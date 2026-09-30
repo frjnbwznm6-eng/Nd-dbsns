@@ -7,7 +7,7 @@ Option Explicit
 ' Finds an optimal routing from the flight/train data on the sheet named
 ' SHEET_NAME, maximizing the MINIMUM slack (actual time spent in a city minus
 ' the required minimum) across the "optimized" connecting cities (MPU, CUN,
-' GIG, FCO, AMM, DEL), subject to the total trip time (first departure -> last
+' GIG, FCO, AMM, DEL, and PEK on routes 9-10), subject to the total trip time (first departure -> last
 ' arrival) being UNDER the stated budget. On each run, a prompt asks which of
 ' ten supported routings to solve:
 '   Route 1: MPU -> CUZ -> CUN -> GIG -> FCO -> AMM -> DEL -> PEK                 (7 legs)
@@ -22,8 +22,10 @@ Option Explicit
 '  Route 10: AMM -> DEL -> PEK -> FCO -> CUN -> CUZ -> MPU -> CUZ -> GIG          (8 legs)
 ' Routes 5-8 are routes 1-4 run backwards (PEK -> ... -> MPU/CUN/GIG instead of
 ' the other way around). Routes 9-10 start at AMM and fly out to PEK before
-' doubling back west to FCO, so PEK is a connection there (no minimum, not
-' part of the objective -- see RequiredMinutes/IsOptimizedCity). Routes 3, 4,
+' doubling back west to FCO, so PEK is a connection there, with a 3-hour
+' minimum that counts toward the objective like any other optimized city.
+' On routes 1-8 PEK is only ever the first or last city, never a connection,
+' so its minimum never applies there. Routes 3, 4,
 ' 7, 8, 9 & 10 detour out to MPU and back through
 ' CUZ, so CUZ is visited (and evaluated as a connection) twice. Route length is
 ' NOT a fixed constant -- N_LEGS is a module-level variable set by InitRoute
@@ -46,7 +48,7 @@ Option Explicit
 '
 ' CUZ is excluded from the objective (no minimum required there, and its
 ' connection doesn't count toward the max-min slack), per spec. Every other
-' connecting city visited -- MPU, CUN, GIG, FCO, AMM, DEL -- has a required
+' connecting city visited -- MPU, CUN, GIG, FCO, AMM, DEL, PEK -- has a required
 ' minimum and counts toward the objective.
 '
 ' ALGORITHM
@@ -423,6 +425,7 @@ Private Function RequiredMinutes(city As String) As Long
         Case "FCO": RequiredMinutes = 3 * 60 + 0
         Case "AMM": RequiredMinutes = 7 * 60 + 38
         Case "DEL": RequiredMinutes = 9 * 60 + 0
+        Case "PEK": RequiredMinutes = 3 * 60 + 0   ' only a connection on routes 9-10
         Case Else: RequiredMinutes = 0   ' any other city: no minimum
     End Select
 End Function
@@ -433,7 +436,7 @@ End Function
 ' minimum (see RequiredMinutes above): that minimum is still enforced as a
 ' hard floor on every CUZ connection (Propagate always applies
 ' RequiredMinutes regardless of this function), it just isn't stretched by
-' the slack search the way CUN/GIG/FCO/AMM/DEL/MPU are. CUZ appears twice in
+' the slack search the way CUN/GIG/FCO/AMM/DEL/MPU/PEK are. CUZ appears twice in
 ' routes 3-4 and 7-10 -- both occurrences are handled independently and
 ' correctly, since this is keyed by city name only. Note that a route's OWN
 ' starting city (e.g. GIG in route 3, PEK in route 5, AMM in route 9) never gets evaluated
@@ -443,7 +446,7 @@ End Function
 ' these do for their own start city).
 Private Function IsOptimizedCity(city As String) As Boolean
     Select Case UCase(city)
-        Case "MPU", "CUN", "GIG", "FCO", "AMM", "DEL": IsOptimizedCity = True
+        Case "MPU", "CUN", "GIG", "FCO", "AMM", "DEL", "PEK": IsOptimizedCity = True
         Case Else: IsOptimizedCity = False   ' CUZ excluded from the max-min objective
     End Select
 End Function
