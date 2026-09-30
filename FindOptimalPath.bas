@@ -119,8 +119,8 @@ Option Explicit
 Private Const SHEET_NAME As String = "Flight Schedule"   ' <-- change if needed
 
 Private Const BUDGET_DAYS As Long = 5
-Private Const BUDGET_HOURS As Long = 17
-Private Const BUDGET_MINUTES As Long = 28
+Private Const BUDGET_HOURS As Long = 14
+Private Const BUDGET_MINUTES As Long = 0
 
 Private Const MAX_S_CAP As Long = 43200   ' safety cap on the slack search, minutes (30 days)
 Private Const HUGE_BUDGET As Long = 2000000000   ' used only to find the true best-case total when infeasible
