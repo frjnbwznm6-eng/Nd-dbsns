@@ -9,7 +9,7 @@ Option Explicit
 ' the required minimum) across the "optimized" connecting cities (MPU, CUN,
 ' GIG, FCO, AMM, DEL), subject to the total trip time (first departure -> last
 ' arrival) being UNDER the stated budget. On each run, a prompt asks which of
-' eight supported routings to solve:
+' ten supported routings to solve:
 '   Route 1: MPU -> CUZ -> CUN -> GIG -> FCO -> AMM -> DEL -> PEK                 (7 legs)
 '   Route 2: MPU -> CUZ -> GIG -> CUN -> FCO -> AMM -> DEL -> PEK                 (7 legs)
 '   Route 3: GIG -> CUZ -> MPU -> CUZ -> CUN -> FCO -> AMM -> DEL -> PEK          (8 legs)
@@ -18,8 +18,13 @@ Option Explicit
 '   Route 6: PEK -> DEL -> AMM -> FCO -> CUN -> GIG -> CUZ -> MPU                 (7 legs)
 '   Route 7: PEK -> DEL -> AMM -> FCO -> GIG -> CUZ -> MPU -> CUZ -> CUN          (8 legs)
 '   Route 8: PEK -> DEL -> AMM -> FCO -> CUN -> CUZ -> MPU -> CUZ -> GIG          (8 legs)
+'   Route 9: AMM -> DEL -> PEK -> FCO -> GIG -> CUZ -> MPU -> CUZ -> CUN          (8 legs)
+'  Route 10: AMM -> DEL -> PEK -> FCO -> CUN -> CUZ -> MPU -> CUZ -> GIG          (8 legs)
 ' Routes 5-8 are routes 1-4 run backwards (PEK -> ... -> MPU/CUN/GIG instead of
-' the other way around). Routes 3, 4, 7 & 8 detour out to MPU and back through
+' the other way around). Routes 9-10 start at AMM and fly out to PEK before
+' doubling back west to FCO, so PEK is a connection there (no minimum, not
+' part of the objective -- see RequiredMinutes/IsOptimizedCity). Routes 3, 4,
+' 7, 8, 9 & 10 detour out to MPU and back through
 ' CUZ, so CUZ is visited (and evaluated as a connection) twice. Route length is
 ' NOT a fixed constant -- N_LEGS is a module-level variable set by InitRoute
 ' per route choice, and LegOrigin/LegDest are resized (ReDim) to match, since
@@ -31,11 +36,11 @@ Option Explicit
 ' (since PEK is far ahead of MPU/CUN/GIG) and so correctly ADDS time back
 ' rather than subtracting it, with no special-casing required.
 '
-' Because routes 3-8 all start somewhere other than MPU, that starting city
-' (GIG, CUN, or PEK) is only ever LegOrigin(0) -- it never appears as a
+' Because routes 3-10 all start somewhere other than MPU, that starting city
+' (GIG, CUN, PEK, or AMM) is only ever LegOrigin(0) -- it never appears as a
 ' LegDest (a connection), so its minimum-stay requirement is never evaluated
 ' for that route, exactly as intended ("no minimum needed for the city you
-' start in", which includes PEK on routes 5-8). No special-casing needed:
+' start in", which includes PEK on routes 5-8 and AMM on routes 9-10). No special-casing needed:
 ' RequiredMinutes/IsOptimizedCity are only ever queried at LegDest(i), so
 ' this falls out of the existing design automatically.
 '
@@ -84,7 +89,7 @@ Option Explicit
 '   the output's connections table for that.
 '
 ' OUTPUT
-'   A sheet named "Optimal Path - Route N" (N = 1-8, per your choice at the
+'   A sheet named "Optimal Path - Route N" (N = 1-10, per your choice at the
 '   prompt) is (re)created each run with:
 '     - a summary banner (feasible/infeasible, total time, budget)
 '     - the chosen flights/trains, with a "Source Row" column pointing back to
@@ -115,8 +120,8 @@ Private Const BUDGET_MINUTES As Long = 28
 Private Const MAX_S_CAP As Long = 43200   ' safety cap on the slack search, minutes (30 days)
 Private Const HUGE_BUDGET As Long = 2000000000   ' used only to find the true best-case total when infeasible
 
-' Route length varies by route choice (7 legs for routes 1-2, 8 for routes
-' 3-4), so this is a runtime variable, not a Const -- InitRoute sets it and
+' Route length varies by route choice (7 legs for routes 1-2 & 5-6, 8 for
+' routes 3-4 & 7-10), so this is a runtime variable, not a Const -- InitRoute sets it and
 ' ReDims LegOrigin/LegDest to match before filling them in.
 Private N_LEGS As Long
 Private LegOrigin() As String
@@ -141,7 +146,7 @@ Public Sub FindOptimalPath()
     Dim routeLabel As String, outSheetName As String
 
     Dim promptMsg As String
-    promptMsg = "Which route do you want to solve? Enter 1-8:" & vbCrLf & vbCrLf & _
+    promptMsg = "Which route do you want to solve? Enter 1-10:" & vbCrLf & vbCrLf & _
                 "1)  MPU -> CUZ -> CUN -> GIG -> FCO -> AMM -> DEL -> PEK" & vbCrLf & _
                 "2)  MPU -> CUZ -> GIG -> CUN -> FCO -> AMM -> DEL -> PEK" & vbCrLf & _
                 "3)  GIG -> CUZ -> MPU -> CUZ -> CUN -> FCO -> AMM -> DEL -> PEK" & vbCrLf & _
@@ -149,14 +154,17 @@ Public Sub FindOptimalPath()
                 "5)  PEK -> DEL -> AMM -> FCO -> GIG -> CUN -> CUZ -> MPU" & vbCrLf & _
                 "6)  PEK -> DEL -> AMM -> FCO -> CUN -> GIG -> CUZ -> MPU" & vbCrLf & _
                 "7)  PEK -> DEL -> AMM -> FCO -> GIG -> CUZ -> MPU -> CUZ -> CUN" & vbCrLf & _
-                "8)  PEK -> DEL -> AMM -> FCO -> CUN -> CUZ -> MPU -> CUZ -> GIG" & vbCrLf & vbCrLf & _
+                "8)  PEK -> DEL -> AMM -> FCO -> CUN -> CUZ -> MPU -> CUZ -> GIG" & vbCrLf & _
+                "9)  AMM -> DEL -> PEK -> FCO -> GIG -> CUZ -> MPU -> CUZ -> CUN" & vbCrLf & _
+                "10) AMM -> DEL -> PEK -> FCO -> CUN -> CUZ -> MPU -> CUZ -> GIG" & vbCrLf & vbCrLf & _
                 "(Leave blank or Cancel to stop without running.)"
     Do
         resp = InputBox(promptMsg, "Choose Route")
         If resp = "" Then Exit Sub   ' Cancel, or blank + OK
         If resp = "1" Or resp = "2" Or resp = "3" Or resp = "4" Or _
-           resp = "5" Or resp = "6" Or resp = "7" Or resp = "8" Then Exit Do
-        MsgBox "Please enter a number from 1 to 8.", vbExclamation
+           resp = "5" Or resp = "6" Or resp = "7" Or resp = "8" Or _
+           resp = "9" Or resp = "10" Then Exit Do
+        MsgBox "Please enter a number from 1 to 10.", vbExclamation
     Loop
     routeChoice = CLng(resp)
 
@@ -254,7 +262,10 @@ End Sub
 ' routeChoice 6: PEK -> DEL -> AMM -> FCO -> CUN -> GIG -> CUZ -> MPU                 (7 legs)
 ' routeChoice 7: PEK -> DEL -> AMM -> FCO -> GIG -> CUZ -> MPU -> CUZ -> CUN          (8 legs)
 ' routeChoice 8: PEK -> DEL -> AMM -> FCO -> CUN -> CUZ -> MPU -> CUZ -> GIG          (8 legs)
-' Routes 5-8 are routes 1-4 traversed in reverse. RequiredMinutes/IsOptimizedCity
+' routeChoice 9: AMM -> DEL -> PEK -> FCO -> GIG -> CUZ -> MPU -> CUZ -> CUN          (8 legs)
+' routeChoice 10: AMM -> DEL -> PEK -> FCO -> CUN -> CUZ -> MPU -> CUZ -> GIG         (8 legs)
+' Routes 5-8 are routes 1-4 traversed in reverse. Routes 9-10 are routes 7-8
+' started from AMM instead, with PEK visited as a mid-route connection. RequiredMinutes/IsOptimizedCity
 ' key off city name only, and TZCorrectionMinutes/every other function keys off
 ' N_LEGS, LegOrigin(0) and LegDest(N_LEGS-1) as runtime values, so no other
 ' change is needed to support any of these orderings, the longer 8-leg routes,
@@ -263,7 +274,7 @@ Private Sub InitRoute(routeChoice As Long)
     Select Case routeChoice
         Case 1, 2, 5, 6
             N_LEGS = 7
-        Case 3, 4, 7, 8
+        Case 3, 4, 7, 8, 9, 10
             N_LEGS = 8
     End Select
     ReDim LegOrigin(0 To N_LEGS - 1)
@@ -338,6 +349,24 @@ Private Sub InitRoute(routeChoice As Long)
             LegOrigin(5) = "CUZ": LegDest(5) = "MPU"
             LegOrigin(6) = "MPU": LegDest(6) = "CUZ"
             LegOrigin(7) = "CUZ": LegDest(7) = "GIG"
+        Case 9
+            LegOrigin(0) = "AMM": LegDest(0) = "DEL"
+            LegOrigin(1) = "DEL": LegDest(1) = "PEK"
+            LegOrigin(2) = "PEK": LegDest(2) = "FCO"
+            LegOrigin(3) = "FCO": LegDest(3) = "GIG"
+            LegOrigin(4) = "GIG": LegDest(4) = "CUZ"
+            LegOrigin(5) = "CUZ": LegDest(5) = "MPU"
+            LegOrigin(6) = "MPU": LegDest(6) = "CUZ"
+            LegOrigin(7) = "CUZ": LegDest(7) = "CUN"
+        Case 10
+            LegOrigin(0) = "AMM": LegDest(0) = "DEL"
+            LegOrigin(1) = "DEL": LegDest(1) = "PEK"
+            LegOrigin(2) = "PEK": LegDest(2) = "FCO"
+            LegOrigin(3) = "FCO": LegDest(3) = "CUN"
+            LegOrigin(4) = "CUN": LegDest(4) = "CUZ"
+            LegOrigin(5) = "CUZ": LegDest(5) = "MPU"
+            LegOrigin(6) = "MPU": LegDest(6) = "CUZ"
+            LegOrigin(7) = "CUZ": LegDest(7) = "GIG"
     End Select
 End Sub
 
@@ -405,9 +434,9 @@ End Function
 ' hard floor on every CUZ connection (Propagate always applies
 ' RequiredMinutes regardless of this function), it just isn't stretched by
 ' the slack search the way CUN/GIG/FCO/AMM/DEL/MPU are. CUZ appears twice in
-' routes 3-4 and 7-8 -- both occurrences are handled independently and
+' routes 3-4 and 7-10 -- both occurrences are handled independently and
 ' correctly, since this is keyed by city name only. Note that a route's OWN
-' starting city (e.g. GIG in route 3, PEK in route 5) never gets evaluated
+' starting city (e.g. GIG in route 3, PEK in route 5, AMM in route 9) never gets evaluated
 ' here in the first place, since RequiredMinutes/IsOptimizedCity are only
 ' ever queried at LegDest(i) -- a route's starting city is LegOrigin(0) and
 ' is never also a LegDest unless the route revisits it later (which none of
@@ -1013,7 +1042,7 @@ Private Sub WriteResults(LegData() As Variant, chosenIdx() As Long, _
     minSlackAmongOptimized = -1
     minSlackRow = 0
 
-    For i = 0 To N_LEGS - 2   ' N_LEGS-1 connecting cities (CUZ may appear twice on routes 3-4)
+    For i = 0 To N_LEGS - 2   ' N_LEGS-1 connecting cities (CUZ may appear twice on routes 3-4 & 7-10)
         r = connHdr + 1 + i
         cityAfter = LegDest(i)
         req = RequiredMinutes(cityAfter)
