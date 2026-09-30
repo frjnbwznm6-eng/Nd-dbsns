@@ -131,6 +131,11 @@ Private Const HUGE_BUDGET As Long = 2000000000   ' used only to find the true be
 Private N_LEGS As Long
 Private LegOrigin() As String
 Private LegDest() As String
+
+' Source rows whose Arrival Date/Time came out BEFORE their departure (once
+' time zones are accounted for) and were pushed forward a day -- see
+' BuildLeg. Reset each run and reported in the final message box.
+Private FixedArrivalRows As String
 ' -------------------------------------------------------------------------------
 
 
@@ -176,6 +181,7 @@ Public Sub FindOptimalPath()
     routeChoice = CLng(resp)
 
     Call InitRoute(routeChoice)
+    FixedArrivalRows = ""
     ReDim LegData(0 To N_LEGS - 1)
     routeLabel = "Route " & routeChoice & ": " & LegOrigin(0)
     For i = 0 To N_LEGS - 1
@@ -234,12 +240,31 @@ Public Sub FindOptimalPath()
     Call ComputeAllCandidates(LegData, budget, candMinSlack, candTotalSlack, candTotalTime, candChosen, candCount)
 
     If candCount = 0 Then
-        Call FeasibleAtS(LegData, 0, HUGE_BUDGET, tmpChosen, tmpTotal)   ' find the true best-case total, ignoring the budget
+        ' Find the true best-case total, ignoring the budget. If even that
+        ' fails, no starting flight can be chained all the way to the end
+        ' (e.g. the schedule runs out before the last leg), so there is no
+        ' itinerary to show at all.
+        If Not FeasibleAtS(LegData, 0, HUGE_BUDGET, tmpChosen, tmpTotal) Then
+            ' Remove any results sheet from an earlier run so a stale itinerary isn't left looking current.
+            Application.DisplayAlerts = False
+            On Error Resume Next
+            ThisWorkbook.Sheets(outSheetName).Delete
+            On Error GoTo 0
+            Application.DisplayAlerts = True
+            MsgBox routeLabel & vbCrLf & vbCrLf & _
+                   "No complete itinerary exists for this route: no starting flight can be connected " & _
+                   "all the way to " & LegDest(N_LEGS - 1) & " while meeting every minimum stay, " & _
+                   "no matter how long the trip takes. The schedule on '" & SHEET_NAME & "' likely " & _
+                   "runs out of flights before the final leg." & vbCrLf & vbCrLf & _
+                   FixedArrivalsNote(), vbExclamation
+            Exit Sub
+        End If
         Call WriteResults(LegData, tmpChosen, 0, tmpTotal, budget, False, routeLabel, outSheetName)
         MsgBox routeLabel & vbCrLf & vbCrLf & _
                "No itinerary fits within the " & FormatDuration(CDbl(budget)) & " budget." & vbCrLf & _
                "Tightest possible total, time-zone adjusted (zero extra slack beyond the minimums): " & FormatDuration(tmpTotal) & vbCrLf & _
                "That is over budget by " & FormatDuration(tmpTotal - budget) & "." & vbCrLf & vbCrLf & _
+               FixedArrivalsNote() & _
                "See the '" & outSheetName & "' sheet for the closest itinerary found.", vbExclamation
         Exit Sub
     End If
@@ -257,7 +282,8 @@ Public Sub FindOptimalPath()
            "Guaranteed minimum layover slack: " & Sstar & " min (" & FormatDuration(CDbl(Sstar)) & ")." & vbCrLf & _
            "Total trip time, time-zone adjusted: " & FormatDuration(finalTotal) & "  (budget " & FormatDuration(CDbl(budget)) & ")." & vbCrLf & vbCrLf & _
            "See the '" & outSheetName & "' sheet for full details, including a Top 10 Alternative Routes table " & _
-           "further down so you can compare the trade-off between worst-case slack and total slack.", vbInformation
+           "further down so you can compare the trade-off between worst-case slack and total slack." & _
+           IIf(FixedArrivalRows = "", "", vbCrLf & vbCrLf & FixedArrivalsNote()), vbInformation
 End Sub
 
 
@@ -528,10 +554,12 @@ Private Function BuildLeg(data As Variant, colOrigin As Long, colDest As Long, _
     Dim depDT As Date, arrDT As Date
     Dim isMatch As Boolean
     Dim layoverVal As String
+    Dim tzGap As Long
     Dim result() As Variant, final() As Variant
 
     n = UBound(data, 1)
     cnt = 0
+    tzGap = UTCOffsetMinutes(destCode) - UTCOffsetMinutes(originCode)
 
     For i = 2 To n   ' row 1 = headers
         isMatch = False
@@ -544,6 +572,20 @@ Private Function BuildLeg(data As Variant, colOrigin As Long, colDest As Long, _
         If isMatch Then
             If TryCombine(data(i, colDepDate), data(i, colDepTime), depDT) And _
                TryCombine(data(i, colArrDate), data(i, colArrTime), arrDT) Then
+                ' An arrival that lands at or before its own departure (in
+                ' true elapsed time, i.e. after removing the time-zone gap)
+                ' is an overnight trip whose Arrival Date was entered as the
+                ' departure day. Taken literally it looks like the fastest
+                ' option of all, so the earliest-arrival search picks it and
+                ' the itinerary appears to run backwards in time. Push it
+                ' forward a day at a time until it's after the departure.
+                If (arrDT - depDT) * 1440# - tzGap <= 0 Then
+                    Do While (arrDT - depDT) * 1440# - tzGap <= 0
+                        arrDT = arrDT + 1
+                    Loop
+                    If FixedArrivalRows <> "" Then FixedArrivalRows = FixedArrivalRows & ", "
+                    FixedArrivalRows = FixedArrivalRows & i
+                End If
                 cnt = cnt + 1
                 ReDim Preserve result(1 To 4, 1 To cnt)   ' last dimension only -- VBA's ReDim Preserve rule
                 result(1, cnt) = depDT
@@ -571,6 +613,15 @@ Private Function BuildLeg(data As Variant, colOrigin As Long, colDest As Long, _
 
     Call SortLegByDep(final)
     BuildLeg = final
+End Function
+
+
+' Message-box text listing the source rows BuildLeg corrected, or "" if none.
+Private Function FixedArrivalsNote() As String
+    If FixedArrivalRows = "" Then Exit Function
+    FixedArrivalsNote = "Note: these '" & SHEET_NAME & "' rows had an arrival before their departure " & _
+                        "and were treated as arriving the next day: row(s) " & FixedArrivalRows & "." & vbCrLf & _
+                        "Consider correcting their Arrival Date on the sheet." & vbCrLf & vbCrLf
 End Function
 
 
