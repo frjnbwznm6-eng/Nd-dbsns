@@ -54,6 +54,15 @@ Option Explicit
 ' connecting city visited -- MPU, CUN, GIG, FCO, AMM, DEL, PEK -- has a required
 ' minimum and counts toward the objective.
 '
+' OPEN HOURS
+'   Some connecting cities also have daily open hours (see OpenWindow and
+'   OpenBuffers below). At such a connection, the usable part of the stay --
+'   from (arrival + an after-arrival buffer) to (next departure - a
+'   before-departure buffer) -- must overlap the city's open hours by MORE
+'   than zero minutes, on the local day(s) you are actually there. Like the
+'   minimum stays, this applies only at connections, never to a route's first
+'   or last city. FCO and CUZ have no open-hours rule.
+'
 ' ALGORITHM
 '   The one truly free choice in the whole problem is which flight you start
 '   on -- every leg after that is a forced, greedy-optimal choice for whatever
@@ -65,7 +74,9 @@ Option Explicit
 '   every downstream constraint, never tighten it (standard "earliest
 '   arrival" argument for time-expanded networks), so it minimizes total
 '   finish time for a fixed start and floor, and feasibility at a given
-'   (start, S) is monotonically non-increasing in S.
+'   (start, S) is monotonically non-increasing in S. The open-hours rule
+'   keeps this true: arriving earlier can only make the earliest allowed
+'   next departure earlier or the same (see EarliestOpenMin), never later.
 '
 '   BestForStart binary-searches S for ONE start to find that start's own
 '   best achievable floor. ComputeAllCandidates runs BestForStart for EVERY
@@ -253,7 +264,7 @@ Public Sub FindOptimalPath()
             Application.DisplayAlerts = True
             MsgBox routeLabel & vbCrLf & vbCrLf & _
                    "No complete itinerary exists for this route: no starting flight can be connected " & _
-                   "all the way to " & LegDest(N_LEGS - 1) & " while meeting every minimum stay, " & _
+                   "all the way to " & LegDest(N_LEGS - 1) & " while meeting every minimum stay and open-hours rule, " & _
                    "no matter how long the trip takes. The schedule on '" & SHEET_NAME & "' likely " & _
                    "runs out of flights before the final leg." & vbCrLf & vbCrLf & _
                    FixedArrivalsNote(), vbExclamation
@@ -504,6 +515,108 @@ Private Function IsOptimizedCity(city As String) As Boolean
 End Function
 
 
+' --------------------------- OPEN HOURS ---------------------------------------
+' Buffers for each city that has open hours: the usable part of a stay
+' starts afterArr minutes after you land and ends beforeDep minutes before
+' your next departure. Returns False for a city with no open-hours rule.
+Private Function OpenBuffers(ByVal city As String, ByRef afterArr As Long, ByRef beforeDep As Long) As Boolean
+    OpenBuffers = True
+    Select Case UCase(city)
+        Case "DEL": afterArr = 2 * 60 + 30: beforeDep = 3 * 60
+        Case "PEK": afterArr = 1 * 60:      beforeDep = 2 * 60
+        Case "AMM": afterArr = 2 * 60 + 30: beforeDep = 3 * 60
+        Case "GIG": afterArr = 1 * 60:      beforeDep = 2 * 60 + 30
+        Case "MPU": afterArr = 40:          beforeDep = 40
+        Case "CUN": afterArr = 2 * 60:      beforeDep = 3 * 60
+        Case Else: OpenBuffers = False     ' FCO, CUZ: no open-hours rule
+    End Select
+End Function
+
+
+' The k-th open window (k = 1, 2, ...) for city on weekday wd (VBA Weekday:
+' vbSunday = 1 ... vbSaturday = 7), as minutes after local midnight.
+' Returns False when there is no k-th window that day (e.g. DEL on Friday).
+' Windows within a day must be listed in time order.
+Private Function OpenWindow(ByVal city As String, ByVal wd As Long, ByVal k As Long, _
+                            ByRef startMin As Long, ByRef endMin As Long) As Boolean
+    OpenWindow = False
+    Select Case UCase(city)
+        Case "DEL"   ' 6:15 AM - 5:00 PM, closed Friday
+            If k = 1 And wd <> vbFriday Then startMin = 6 * 60 + 15: endMin = 17 * 60: OpenWindow = True
+        Case "PEK"   ' 7:30 AM - 6:00 PM weekdays, 7:30 AM - 6:30 PM Sat/Sun
+            If k = 1 Then
+                startMin = 7 * 60 + 30
+                If wd = vbSaturday Or wd = vbSunday Then endMin = 18 * 60 + 30 Else endMin = 18 * 60
+                OpenWindow = True
+            End If
+        Case "AMM"   ' 6:30 AM - 5:00 PM daily, plus 8:30 PM - 10:30 PM except Fri/Sat
+            If k = 1 Then
+                startMin = 6 * 60 + 30: endMin = 17 * 60: OpenWindow = True
+            ElseIf k = 2 And wd <> vbFriday And wd <> vbSaturday Then
+                startMin = 20 * 60 + 30: endMin = 22 * 60 + 30: OpenWindow = True
+            End If
+        Case "GIG"   ' 7:30 AM - 6:00 PM daily
+            If k = 1 Then startMin = 7 * 60 + 30: endMin = 18 * 60: OpenWindow = True
+        Case "MPU"   ' 8:00 AM - 5:30 PM daily
+            If k = 1 Then startMin = 8 * 60: endMin = 17 * 60 + 30: OpenWindow = True
+        Case "CUN"   ' 8:00 AM - 4:00 PM daily
+            If k = 1 Then startMin = 8 * 60: endMin = 16 * 60: OpenWindow = True
+    End Select
+End Function
+
+
+' A Date as whole minutes since VBA's day 0, so open-hours checks compare
+' exact integers instead of floating-point day fractions.
+Private Function ToMin(ByVal dt As Date) As Long
+    ToMin = CLng(Round(CDbl(dt) * 1440#, 0))
+End Function
+
+
+' The earliest minute >= tMin at which city is open: tMin itself if it falls
+' inside an open window, otherwise the start of the next window. Returns -1
+' if the city has no open window in the following 8 days. Non-decreasing in
+' tMin, which is what keeps the earliest-arrival search optimal.
+Private Function EarliestOpenMin(ByVal city As String, ByVal tMin As Long) As Long
+    Dim dayN As Long, k As Long, ws As Long, we As Long, sMin As Long, eMin As Long
+    For dayN = tMin \ 1440 To tMin \ 1440 + 8
+        k = 1
+        Do While OpenWindow(city, CLng(Weekday(CDate(dayN))), k, sMin, eMin)
+            ws = dayN * 1440 + sMin
+            we = dayN * 1440 + eMin
+            If tMin < we Then
+                If tMin > ws Then EarliestOpenMin = tMin Else EarliestOpenMin = ws
+                Exit Function
+            End If
+            k = k + 1
+        Loop
+    Next dayN
+    EarliestOpenMin = -1
+End Function
+
+
+' Total minutes of [startAt, endAt) that fall inside city's open windows.
+Private Function OpenOverlapMinutes(ByVal city As String, ByVal startAt As Long, ByVal endAt As Long) As Long
+    Dim dayN As Long, k As Long, ws As Long, we As Long, sMin As Long, eMin As Long
+    Dim lo As Long, hi As Long, total As Long
+    total = 0
+    If endAt > startAt Then
+        For dayN = startAt \ 1440 To endAt \ 1440
+            k = 1
+            Do While OpenWindow(city, CLng(Weekday(CDate(dayN))), k, sMin, eMin)
+                ws = dayN * 1440 + sMin
+                we = dayN * 1440 + eMin
+                If startAt > ws Then lo = startAt Else lo = ws
+                If endAt < we Then hi = endAt Else hi = we
+                If hi > lo Then total = total + (hi - lo)
+                k = k + 1
+            Loop
+        Next dayN
+    End If
+    OpenOverlapMinutes = total
+End Function
+' -------------------------------------------------------------------------------
+
+
 Private Function BudgetMinutes() As Long
     BudgetMinutes = BUDGET_DAYS * 1440 + BUDGET_HOURS * 60 + BUDGET_MINUTES
 End Function
@@ -651,16 +764,16 @@ Private Sub SortLegByDep(arr As Variant)
 End Sub
 
 
-' Among rows in legArr with DepDT >= minDep, returns the row index (1..n)
-' with the earliest ArrDT, or 0 if none qualify.
-Private Function EarliestAfterIdx(legArr As Variant, minDep As Date) As Long
+' Among rows in legArr departing at or after minDepMin (whole minutes, see
+' ToMin), returns the row index (1..n) with the earliest ArrDT, or 0 if none.
+Private Function EarliestAfterIdx(legArr As Variant, minDepMin As Long) As Long
     Dim n As Long, i As Long
     Dim bestIdx As Long, bestArr As Date
 
     bestIdx = 0
     n = UBound(legArr, 1)
     For i = 1 To n
-        If legArr(i, 1) >= minDep Then
+        If ToMin(legArr(i, 1)) >= minDepMin Then
             If bestIdx = 0 Then
                 bestIdx = i
                 bestArr = legArr(i, 2)
@@ -675,13 +788,16 @@ End Function
 
 
 ' Walks all N_LEGS legs starting from LegData(0)'s row `startIdx`, requiring
-' each optimized connection's layover to be >= required + S (CUZ requires only
-' a non-negative connection). Returns False if any leg has no qualifying flight.
+' each connection's layover to be >= its required minimum (+ S for optimized
+' cities), and, for cities with open hours, the stay between the buffers to
+' overlap those hours by more than zero minutes. Returns False if any leg
+' has no qualifying flight.
 Private Function Propagate(LegData() As Variant, startIdx As Long, S As Long, _
                             ByRef chosenIdx() As Long, ByRef totalMinutes As Double) As Boolean
     Dim i As Long, idx As Long, req As Long
-    Dim arrDT As Date, minDep As Date
+    Dim arrDT As Date, minDepMin As Long
     Dim curLeg As Variant, nextLeg As Variant
+    Dim cityAt As String, afterArr As Long, beforeDep As Long, openAt As Long
 
     ReDim chosenIdx(0 To N_LEGS - 1)
     chosenIdx(0) = startIdx
@@ -689,12 +805,25 @@ Private Function Propagate(LegData() As Variant, startIdx As Long, S As Long, _
     arrDT = curLeg(startIdx, 2)
 
     For i = 1 To N_LEGS - 1
-        req = RequiredMinutes(LegDest(i - 1))
-        If IsOptimizedCity(LegDest(i - 1)) Then req = req + S
-        minDep = DateAdd("n", req, arrDT)   ' "n" = minutes in DateAdd
+        cityAt = LegDest(i - 1)
+        req = RequiredMinutes(cityAt)
+        If IsOptimizedCity(cityAt) Then req = req + S
+        minDepMin = ToMin(arrDT) + req
+
+        ' Open hours: the first open minute at or after (arrival + buffer)
+        ' must come strictly before (departure - buffer), i.e. departure >=
+        ' that minute + buffer + 1, for a non-zero overlap.
+        If OpenBuffers(cityAt, afterArr, beforeDep) Then
+            openAt = EarliestOpenMin(cityAt, ToMin(arrDT) + afterArr)
+            If openAt < 0 Then
+                Propagate = False
+                Exit Function
+            End If
+            If openAt + beforeDep + 1 > minDepMin Then minDepMin = openAt + beforeDep + 1
+        End If
 
         nextLeg = LegData(i)
-        idx = EarliestAfterIdx(nextLeg, minDep)
+        idx = EarliestAfterIdx(nextLeg, minDepMin)
         If idx = 0 Then
             Propagate = False
             Exit Function
@@ -1003,6 +1132,7 @@ Private Sub WriteResults(LegData() As Variant, chosenIdx() As Long, _
     Dim minSlackAmongOptimized As Double, thisSlack As Double
     Dim minSlackRow As Long
     Dim arrRow As Long, depRow As Long
+    Dim afterArr As Long, beforeDep As Long, openMin As Long
 
     Application.ScreenUpdating = False
     Application.DisplayAlerts = False
@@ -1109,10 +1239,11 @@ Private Sub WriteResults(LegData() As Variant, chosenIdx() As Long, _
 
     ' ===================== CONNECTIONS / AUDIT TABLE =====================
     connHdr = hdrRow + N_LEGS + 3
-    outWs.Cells(connHdr, 1).Resize(1, 10).Value = Array("Connecting City", "Arrival (prior leg)", _
+    outWs.Cells(connHdr, 1).Resize(1, 11).Value = Array("Connecting City", "Arrival (prior leg)", _
         "Departure (next leg)", "Actual Layover (min)", "Actual Layover", "Minimum Required (min)", _
-        "Minimum Required", "Slack (min)", "Slack = Layover - Min", "Counts Toward Objective?")
-    With outWs.Cells(connHdr, 1).Resize(1, 10)
+        "Minimum Required", "Slack (min)", "Slack = Layover - Min", "Counts Toward Objective?", _
+        "Time In Open Hours (after buffers)")
+    With outWs.Cells(connHdr, 1).Resize(1, 11)
         .Font.Bold = True
         .Font.Color = RGB(255, 255, 255)
         .Interior.Color = RGB(31, 78, 121)
@@ -1142,6 +1273,20 @@ Private Sub WriteResults(LegData() As Variant, chosenIdx() As Long, _
         outWs.Cells(r, 9).Formula = "=IF(H" & r & ">=0,INT(H" & r & "/60)&""h ""&MOD(H" & r & ",60)&""m"",""-""&INT(ABS(H" & r & ")/60)&""h ""&MOD(ABS(H" & r & "),60)&""m"")"
         outWs.Cells(r, 10).Value = IIf(IsOptimizedCity(cityAfter), "YES", "no (CUZ)")
 
+        ' Open-hours audit: how much of (arrival + buffer) .. (departure -
+        ' buffer) falls inside the city's open hours. Must be > 0.
+        If OpenBuffers(cityAfter, afterArr, beforeDep) Then
+            leg = LegData(i)
+            nextLeg = LegData(i + 1)
+            openMin = OpenOverlapMinutes(cityAfter, ToMin(leg(chosenIdx(i), 2)) + afterArr, _
+                                         ToMin(nextLeg(chosenIdx(i + 1), 1)) - beforeDep)
+            outWs.Cells(r, 11).Value = (openMin \ 60) & "h " & (openMin Mod 60) & "m  (" & _
+                FormatDuration(CDbl(afterArr)) & " after arr, " & FormatDuration(CDbl(beforeDep)) & " before dep)"
+            If openMin <= 0 Then outWs.Cells(r, 11).Font.Color = RGB(198, 40, 40)
+        Else
+            outWs.Cells(r, 11).Value = "n/a (no open-hours rule)"
+        End If
+
         If IsOptimizedCity(cityAfter) Then
             leg = LegData(i)
             nextLeg = LegData(i + 1)
@@ -1155,19 +1300,19 @@ Private Sub WriteResults(LegData() As Variant, chosenIdx() As Long, _
             End If
         End If
     Next i
-    outWs.Cells(connHdr, 1).Resize(N_LEGS, 10).Borders.LineStyle = xlContinuous
+    outWs.Cells(connHdr, 1).Resize(N_LEGS, 11).Borders.LineStyle = xlContinuous
 
     For i = 0 To N_LEGS - 2
         r = connHdr + 1 + i
         cityAfter = LegDest(i)
         If IsOptimizedCity(cityAfter) Then
             If r = minSlackRow Then
-                outWs.Cells(r, 1).Resize(1, 10).Interior.Color = RGB(255, 193, 7)     ' gold = the binding constraint
+                outWs.Cells(r, 1).Resize(1, 11).Interior.Color = RGB(255, 193, 7)     ' gold = the binding constraint
             Else
-                outWs.Cells(r, 1).Resize(1, 10).Interior.Color = RGB(198, 239, 206)   ' green = has surplus slack
+                outWs.Cells(r, 1).Resize(1, 11).Interior.Color = RGB(198, 239, 206)   ' green = has surplus slack
             End If
         Else
-            outWs.Cells(r, 1).Resize(1, 10).Interior.Color = RGB(230, 230, 230)       ' gray = not part of objective (CUZ)
+            outWs.Cells(r, 1).Resize(1, 11).Interior.Color = RGB(230, 230, 230)       ' gray = not part of objective (CUZ)
         End If
     Next i
 
@@ -1266,7 +1411,7 @@ Private Sub WriteResults(LegData() As Variant, chosenIdx() As Long, _
     outWs.Range("H" & tlRow & ":J" & tlRow).Interior.Color = RGB(230, 230, 230)
     outWs.Range("A" & tlRow & ":J" & tlRow).HorizontalAlignment = xlCenter
 
-    outWs.Columns("A:J").AutoFit
+    outWs.Columns("A:K").AutoFit
     outWs.Activate
     Application.ScreenUpdating = True
 End Sub
