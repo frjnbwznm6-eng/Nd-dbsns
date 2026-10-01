@@ -594,11 +594,15 @@ Private Function EarliestOpenMin(ByVal city As String, ByVal tMin As Long) As Lo
 End Function
 
 
-' Total minutes of [startAt, endAt) that fall inside city's open windows.
-Private Function OpenOverlapMinutes(ByVal city As String, ByVal startAt As Long, ByVal endAt As Long) As Long
+' The parts of [startAt, endAt) that fall inside city's open windows, as
+' clock times, e.g. "9:00 AM - 12:00 PM". If the stay covers more than one
+' open window, each is listed with its weekday, e.g.
+' "Thu 8:30 PM - 10:30 PM; Fri 6:30 AM - 9:15 AM". "" if there is no overlap.
+Private Function OpenOverlapText(ByVal city As String, ByVal startAt As Long, ByVal endAt As Long) As String
     Dim dayN As Long, k As Long, ws As Long, we As Long, sMin As Long, eMin As Long
-    Dim lo As Long, hi As Long, total As Long
-    total = 0
+    Dim lo As Long, hi As Long, n As Long
+    Dim segLo() As Long, segHi() As Long, txt As String
+    n = 0
     If endAt > startAt Then
         For dayN = startAt \ 1440 To endAt \ 1440
             k = 1
@@ -607,12 +611,25 @@ Private Function OpenOverlapMinutes(ByVal city As String, ByVal startAt As Long,
                 we = dayN * 1440 + eMin
                 If startAt > ws Then lo = startAt Else lo = ws
                 If endAt < we Then hi = endAt Else hi = we
-                If hi > lo Then total = total + (hi - lo)
+                If hi > lo Then
+                    n = n + 1
+                    ReDim Preserve segLo(1 To n)
+                    ReDim Preserve segHi(1 To n)
+                    segLo(n) = lo
+                    segHi(n) = hi
+                End If
                 k = k + 1
             Loop
         Next dayN
     End If
-    OpenOverlapMinutes = total
+
+    For k = 1 To n
+        If k > 1 Then txt = txt & "; "
+        If n > 1 Then txt = txt & Format(CDate(segLo(k) / 1440#), "ddd ")
+        txt = txt & Format(CDate(segLo(k) / 1440#), "h:mm AM/PM") & " - " & _
+                    Format(CDate(segHi(k) / 1440#), "h:mm AM/PM")
+    Next k
+    OpenOverlapText = txt
 End Function
 ' -------------------------------------------------------------------------------
 
@@ -1132,7 +1149,7 @@ Private Sub WriteResults(LegData() As Variant, chosenIdx() As Long, _
     Dim minSlackAmongOptimized As Double, thisSlack As Double
     Dim minSlackRow As Long
     Dim arrRow As Long, depRow As Long
-    Dim afterArr As Long, beforeDep As Long, openMin As Long
+    Dim afterArr As Long, beforeDep As Long, openText As String
 
     Application.ScreenUpdating = False
     Application.DisplayAlerts = False
@@ -1239,11 +1256,11 @@ Private Sub WriteResults(LegData() As Variant, chosenIdx() As Long, _
 
     ' ===================== CONNECTIONS / AUDIT TABLE =====================
     connHdr = hdrRow + N_LEGS + 3
-    outWs.Cells(connHdr, 1).Resize(1, 11).Value = Array("Connecting City", "Arrival (prior leg)", _
+    outWs.Cells(connHdr, 1).Resize(1, 13).Value = Array("Connecting City", "Arrival (prior leg)", _
         "Departure (next leg)", "Actual Layover (min)", "Actual Layover", "Minimum Required (min)", _
         "Minimum Required", "Slack (min)", "Slack = Layover - Min", "Counts Toward Objective?", _
-        "Time In Open Hours (after buffers)")
-    With outWs.Cells(connHdr, 1).Resize(1, 11)
+        "Open Hours Available", "Buffer After Arrival", "Buffer Before Departure")
+    With outWs.Cells(connHdr, 1).Resize(1, 13)
         .Font.Bold = True
         .Font.Color = RGB(255, 255, 255)
         .Interior.Color = RGB(31, 78, 121)
@@ -1273,18 +1290,25 @@ Private Sub WriteResults(LegData() As Variant, chosenIdx() As Long, _
         outWs.Cells(r, 9).Formula = "=IF(H" & r & ">=0,INT(H" & r & "/60)&""h ""&MOD(H" & r & ",60)&""m"",""-""&INT(ABS(H" & r & ")/60)&""h ""&MOD(ABS(H" & r & "),60)&""m"")"
         outWs.Cells(r, 10).Value = IIf(IsOptimizedCity(cityAfter), "YES", "no (CUZ)")
 
-        ' Open-hours audit: how much of (arrival + buffer) .. (departure -
-        ' buffer) falls inside the city's open hours. Must be > 0.
+        ' Open-hours audit: the clock times within (arrival + buffer) ..
+        ' (departure - buffer) that fall inside the city's open hours.
         If OpenBuffers(cityAfter, afterArr, beforeDep) Then
             leg = LegData(i)
             nextLeg = LegData(i + 1)
-            openMin = OpenOverlapMinutes(cityAfter, ToMin(leg(chosenIdx(i), 2)) + afterArr, _
-                                         ToMin(nextLeg(chosenIdx(i + 1), 1)) - beforeDep)
-            outWs.Cells(r, 11).Value = (openMin \ 60) & "h " & (openMin Mod 60) & "m  (" & _
-                FormatDuration(CDbl(afterArr)) & " after arr, " & FormatDuration(CDbl(beforeDep)) & " before dep)"
-            If openMin <= 0 Then outWs.Cells(r, 11).Font.Color = RGB(198, 40, 40)
+            openText = OpenOverlapText(cityAfter, ToMin(leg(chosenIdx(i), 2)) + afterArr, _
+                                       ToMin(nextLeg(chosenIdx(i + 1), 1)) - beforeDep)
+            If openText = "" Then
+                outWs.Cells(r, 11).Value = "none"
+                outWs.Cells(r, 11).Font.Color = RGB(198, 40, 40)
+            Else
+                outWs.Cells(r, 11).Value = openText
+            End If
+            outWs.Cells(r, 12).Value = (afterArr \ 60) & "h " & (afterArr Mod 60) & "m"
+            outWs.Cells(r, 13).Value = (beforeDep \ 60) & "h " & (beforeDep Mod 60) & "m"
         Else
             outWs.Cells(r, 11).Value = "n/a (no open-hours rule)"
+            outWs.Cells(r, 12).Value = "n/a"
+            outWs.Cells(r, 13).Value = "n/a"
         End If
 
         If IsOptimizedCity(cityAfter) Then
@@ -1300,19 +1324,19 @@ Private Sub WriteResults(LegData() As Variant, chosenIdx() As Long, _
             End If
         End If
     Next i
-    outWs.Cells(connHdr, 1).Resize(N_LEGS, 11).Borders.LineStyle = xlContinuous
+    outWs.Cells(connHdr, 1).Resize(N_LEGS, 13).Borders.LineStyle = xlContinuous
 
     For i = 0 To N_LEGS - 2
         r = connHdr + 1 + i
         cityAfter = LegDest(i)
         If IsOptimizedCity(cityAfter) Then
             If r = minSlackRow Then
-                outWs.Cells(r, 1).Resize(1, 11).Interior.Color = RGB(255, 193, 7)     ' gold = the binding constraint
+                outWs.Cells(r, 1).Resize(1, 13).Interior.Color = RGB(255, 193, 7)     ' gold = the binding constraint
             Else
-                outWs.Cells(r, 1).Resize(1, 11).Interior.Color = RGB(198, 239, 206)   ' green = has surplus slack
+                outWs.Cells(r, 1).Resize(1, 13).Interior.Color = RGB(198, 239, 206)   ' green = has surplus slack
             End If
         Else
-            outWs.Cells(r, 1).Resize(1, 11).Interior.Color = RGB(230, 230, 230)       ' gray = not part of objective (CUZ)
+            outWs.Cells(r, 1).Resize(1, 13).Interior.Color = RGB(230, 230, 230)       ' gray = not part of objective (CUZ)
         End If
     Next i
 
@@ -1411,7 +1435,7 @@ Private Sub WriteResults(LegData() As Variant, chosenIdx() As Long, _
     outWs.Range("H" & tlRow & ":J" & tlRow).Interior.Color = RGB(230, 230, 230)
     outWs.Range("A" & tlRow & ":J" & tlRow).HorizontalAlignment = xlCenter
 
-    outWs.Columns("A:K").AutoFit
+    outWs.Columns("A:M").AutoFit
     outWs.Activate
     Application.ScreenUpdating = True
 End Sub
