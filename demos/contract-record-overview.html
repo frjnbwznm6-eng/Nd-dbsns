@@ -228,67 +228,16 @@
   .tl .sub { font-size: 12px; color: var(--text-2); }
 
   /* ---------- Participants ---------- */
-  .progress-row { display: flex; align-items: center; gap: 12px; margin: -4px 0 16px; }
-  .progress-row .txt { font-size: 12.5px; color: var(--text-2); white-space: nowrap; }
-  .progress-row .txt b { color: var(--text); font-weight: 500; }
-  .seg { flex: 1; display: flex; gap: 3px; }
-  .seg i { flex: 1; height: 5px; border-radius: 3px; background: #e3e8ef; }
-  .seg i.done { background: var(--green-muted); }
-  .seg i.current { background: var(--green); }
-  .legend { display: flex; gap: 12px; font-size: 11.5px; color: var(--text-2); }
-  .legend span { display: inline-flex; align-items: center; gap: 5px; }
-  .legend .st { width: 12px; height: 12px; }
-  .legend .st.waiting { border-width: 1.5px; }
-  .legend .st.current { box-shadow: 0 0 0 2px #d5f1e2; }
-
-  .roles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-  .role {
-    position: relative; border: 1px solid var(--line); border-radius: 8px; padding: 11px 12px 13px;
-    overflow: hidden; box-shadow: var(--shadow); transition: box-shadow .15s;
-  }
-  .role:hover { box-shadow: var(--shadow-hover); }
-  .role .lbl { font-size: 11.5px; color: var(--text-2); display: flex; justify-content: space-between; align-items: center; }
-  .role .who { display: flex; align-items: center; gap: 9px; margin-top: 8px; }
-  .role .nm { font-size: 13.5px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .role .dept { font-size: 11.5px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .role .act { margin-top: 9px; font-size: 12px; color: var(--text-2); display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; }
-  .role .act.ok { color: var(--green-ink); }
-  .role .act svg.i { width: 13px; height: 13px; }
-  .role .bar { position: absolute; left: 0; bottom: 0; height: 3px; }
-  .role .bar.done { width: 100%; background: var(--green-muted); }
-  .role .bar.current { width: 40%; background: var(--green); }
-  .role .st { width: 18px; height: 18px; }
-  .role .st.done svg.i { width: 11px; height: 11px; }
-
-  .groups { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; margin-top: 10px; }
-  .grp { background: var(--surface-2); border-radius: 8px; padding: 4px 4px 6px; }
-  .grp-head {
-    width: 100%; display: flex; align-items: center; gap: 7px; padding: 9px 8px; border-radius: 6px; text-align: left;
-  }
-  .grp-head:hover { background: #ebeff5; }
-  .grp-head .gi { width: 26px; height: 26px; border-radius: 50%; background: var(--surface); display: grid; place-items: center; color: var(--text-2); box-shadow: var(--shadow); }
-  .grp-head .gi svg.i { width: 14px; height: 14px; }
-  .grp-head .gn { font-size: 13.5px; font-weight: 500; }
-  .grp-head .grow { flex: 1; }
-  .grp-head .cnt { font-size: 12px; color: var(--text-2); white-space: nowrap; }
-  .grp-head .cnt b { color: var(--text); font-weight: 500; }
-  .grp-head .chev { color: var(--text-3); transition: transform .2s; }
-  .grp.collapsed .grp-head .chev { transform: rotate(-90deg); }
-  .grp.collapsed .members { display: none; }
-  .members { list-style: none; margin: 0; padding: 0 4px; }
-  .mem {
-    position: relative; display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 6px;
-    background: var(--surface); border-radius: 7px; margin-top: 5px; box-shadow: var(--shadow);
-  }
-  .mem .info { flex: 1; min-width: 0; }
-  .mem .nm { font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .mem .rl { font-size: 11.5px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .mem .ext { font-size: 10px; font-weight: 500; color: var(--blue); background: var(--blue-soft); padding: 0 5px; border-radius: 4px; line-height: 16px; }
-  /* sequential connector for signatories */
-  .members.seq .mem + .mem::before {
-    content: ""; position: absolute; left: 16px; top: -8px; width: 2px; height: 11px; background: var(--pending-ring);
-  }
-  .order { font-size: 10.5px; color: var(--text-3); width: 10px; text-align: center; flex: none; }
+  .ppl-group + .ppl-group { margin-top: 14px; }
+  .ppl-label { display: flex; align-items: baseline; gap: 6px; font-size: 12px; font-weight: 500; color: var(--text-2); padding: 0 2px 4px; }
+  .ppl-label span { font-weight: 400; color: var(--text-3); }
+  .ppl { list-style: none; margin: 0; padding: 0; }
+  .ppl li { display: flex; align-items: center; gap: 12px; padding: 8px 2px; border-top: 1px solid var(--line); }
+  .ppl .who { flex: 1; min-width: 0; }
+  .ppl .nm { font-size: 13.5px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ppl .rl { font-size: 12px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ppl li.waiting .nm { color: var(--text-2); font-weight: 400; }
+  .chip.current { background: var(--surface); color: var(--green-ink); box-shadow: inset 0 0 0 1.5px var(--green); }
 
   /* ---------- Documents ---------- */
   .docs { display: flex; flex-wrap: wrap; gap: 12px; }
@@ -341,9 +290,7 @@
     main { padding: 20px 16px 40px; }
     .side-pad { padding: 0 16px; }
     .kpis { grid-template-columns: 1fr; }
-    .roles, .groups, .tiles { grid-template-columns: 1fr; }
-    .progress-row { flex-wrap: wrap; }
-    .legend { display: none; }
+    .tiles { grid-template-columns: 1fr; }
     .doc { width: 100%; }
     .step-top { flex-wrap: wrap; }
     .step-top .acts { width: 100%; padding-left: 50px; }
@@ -549,110 +496,70 @@
 
       <div class="card">
         <div class="card-head">
-          <div class="card-title">Contract Participants <span class="count">(8)</span></div>
+          <div class="card-title">Contract Participants</div>
           <a class="link" href="#">Manage Team</a>
         </div>
-
-        <div class="progress-row">
-          <span class="txt"><b>3 of 8</b> actions complete</span>
-          <div class="seg" aria-hidden="true">
-            <i class="done"></i><i class="done"></i><i class="done"></i><i class="current"></i><i></i><i></i><i></i><i></i>
-          </div>
-          <div class="legend">
-            <span><i class="st done"></i>Done</span>
-            <span><i class="st current"></i>In progress</span>
-            <span><i class="st waiting"></i>Waiting</span>
-          </div>
+        <div class="ppl-group">
+          <ul class="ppl">
+            <li class="done">
+              <span class="st done"><svg class="i"><use href="#i-check"/></svg></span>
+              <div class="av sm c2">MG</div>
+              <div class="who"><div class="nm">Melissa Grant</div><div class="rl">Business Owner</div></div>
+              <span class="chip green">Sep 16</span>
+            </li>
+            <li class="done">
+              <span class="st done"><svg class="i"><use href="#i-check"/></svg></span>
+              <div class="av sm c3">TA</div>
+              <div class="who"><div class="nm">Tom Alvarez</div><div class="rl">Sourcing Lead</div></div>
+              <span class="chip green">Sep 12</span>
+            </li>
+            <li class="current">
+              <span class="st current"></span>
+              <div class="av sm c1">CB</div>
+              <div class="who"><div class="nm">Craig Bertoldi</div><div class="rl">Contract Manager</div></div>
+              <span class="chip current">3 days left</span>
+            </li>
+          </ul>
         </div>
-
-        <!-- Individual roles -->
-        <div class="roles">
-          <div class="role">
-            <div class="lbl">Business Owner <span class="st done"><svg class="i"><use href="#i-check"/></svg></span></div>
-            <div class="who">
-              <div class="av c2">MG</div>
-              <div style="min-width:0"><div class="nm">Melissa Grant</div><div class="dept">Plant Operations</div></div>
-            </div>
-            <div class="act ok"><svg class="i"><use href="#i-check-circle"/></svg>Submitted Sep 16</div>
-            <span class="bar done"></span>
-          </div>
-          <div class="role">
-            <div class="lbl">Sourcing Lead <span class="st done"><svg class="i"><use href="#i-check"/></svg></span></div>
-            <div class="who">
-              <div class="av c3">TA</div>
-              <div style="min-width:0"><div class="nm">Tom Alvarez</div><div class="dept">Strategic Sourcing</div></div>
-            </div>
-            <div class="act ok"><svg class="i"><use href="#i-check-circle"/></svg>Sourced Sep 12</div>
-            <span class="bar done"></span>
-          </div>
-          <div class="role">
-            <div class="lbl">Contract Manager <span class="st current"></span></div>
-            <div class="who">
-              <div class="av c1">CB</div>
-              <div style="min-width:0"><div class="nm">Craig Bertoldi</div><div class="dept">Legal Operations</div></div>
-            </div>
-            <div class="act"><svg class="i"><use href="#i-hourglass"/></svg>Triage in progress</div>
-            <span class="bar current"></span>
-          </div>
+        <div class="ppl-group">
+          <div class="ppl-label">Approvers <span>1 of 3</span></div>
+          <ul class="ppl">
+            <li class="done">
+              <span class="st done"><svg class="i"><use href="#i-check"/></svg></span>
+              <div class="av sm c4">JE</div>
+              <div class="who"><div class="nm">Jordan Ellis</div><div class="rl">Finance</div></div>
+              <span class="chip green">Sep 12</span>
+            </li>
+            <li class="waiting">
+              <span class="st waiting"></span>
+              <div class="av sm c5">PR</div>
+              <div class="who"><div class="nm">Priya Raman</div><div class="rl">Legal</div></div>
+              <span class="chip gray">Sep 24</span>
+            </li>
+            <li class="waiting">
+              <span class="st waiting"></span>
+              <div class="av sm c6">ML</div>
+              <div class="who"><div class="nm">Marcus Lee</div><div class="rl">IT Security</div></div>
+              <span class="chip gray">Sep 24</span>
+            </li>
+          </ul>
         </div>
-
-        <!-- Grouped roles -->
-        <div class="groups">
-          <div class="grp">
-            <button class="grp-head" aria-expanded="true">
-              <span class="gi"><svg class="i"><use href="#i-shield"/></svg></span>
-              <span class="gn">Approvers</span>
-              <span class="tag">Parallel</span>
-              <span class="grow"></span>
-              <span class="cnt"><b>1</b> / 3</span>
-              <svg class="i chev"><use href="#i-chev-d"/></svg>
-            </button>
-            <ul class="members">
-              <li class="mem">
-                <span class="st done"><svg class="i"><use href="#i-check"/></svg></span>
-                <div class="av sm c4">JE</div>
-                <div class="info"><div class="nm">Jordan Ellis</div><div class="rl">Finance · Approved</div></div>
-                <span class="chip green">Sep 12</span>
-              </li>
-              <li class="mem">
-                <span class="st waiting"></span>
-                <div class="av sm c5">PR</div>
-                <div class="info"><div class="nm">Priya Raman</div><div class="rl">Legal</div></div>
-                <span class="chip gray">Sep 24</span>
-              </li>
-              <li class="mem">
-                <span class="st waiting"></span>
-                <div class="av sm c6">ML</div>
-                <div class="info"><div class="nm">Marcus Lee</div><div class="rl">IT Security</div></div>
-                <span class="chip gray">Sep 24</span>
-              </li>
-            </ul>
-          </div>
-
-          <div class="grp">
-            <button class="grp-head" aria-expanded="true">
-              <span class="gi"><svg class="i"><use href="#i-pen"/></svg></span>
-              <span class="gn">Signatories</span>
-              <span class="tag">Sequential</span>
-              <span class="grow"></span>
-              <span class="cnt"><b>0</b> / 2</span>
-              <svg class="i chev"><use href="#i-chev-d"/></svg>
-            </button>
-            <ul class="members seq">
-              <li class="mem">
-                <span class="st waiting"></span>
-                <div class="av sm c7">DK</div>
-                <div class="info"><div class="nm">David Kim</div><div class="rl"><span class="ext">External</span> Indy Mfg.</div></div>
-                <span class="chip gray">Oct 14</span>
-              </li>
-              <li class="mem">
-                <span class="st waiting"></span>
-                <div class="av sm c8">KH</div>
-                <div class="info"><div class="nm">Karen Holt</div><div class="rl">Internal · CFO</div></div>
-                <span class="chip gray">Oct 17</span>
-              </li>
-            </ul>
-          </div>
+        <div class="ppl-group">
+          <div class="ppl-label">Signatories <span>0 of 2</span></div>
+          <ul class="ppl">
+            <li class="waiting">
+              <span class="st waiting"></span>
+              <div class="av sm c7">DK</div>
+              <div class="who"><div class="nm">David Kim</div><div class="rl">Indy Manufacturing Corp</div></div>
+              <span class="chip gray">Oct 14</span>
+            </li>
+            <li class="waiting">
+              <span class="st waiting"></span>
+              <div class="av sm c8">KH</div>
+              <div class="who"><div class="nm">Karen Holt</div><div class="rl">CFO</div></div>
+              <span class="chip gray">Oct 17</span>
+            </li>
+          </ul>
         </div>
       </div>
     </section>
@@ -706,14 +613,6 @@
 </div>
 
 <script>
-  // Collapse / expand participant groups
-  document.querySelectorAll('.grp-head').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      var grp = btn.closest('.grp');
-      var collapsed = grp.classList.toggle('collapsed');
-      btn.setAttribute('aria-expanded', String(!collapsed));
-    });
-  });
   // Sidebar active state
   document.querySelectorAll('#sideNav a').forEach(function (a) {
     a.addEventListener('click', function (e) {
