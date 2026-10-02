@@ -231,8 +231,11 @@
   .ppl-group + .ppl-group { margin-top: 16px; }
   .ppl-label { display: flex; align-items: baseline; gap: 6px; font-size: 12px; font-weight: 500; color: var(--text-2); padding-bottom: 8px; border-bottom: 1px solid var(--line); }
   .ppl-label span { font-weight: 400; color: var(--text-3); }
-  .ppl { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding-top: 12px; }
-  .ppl li { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+  .ppl { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding-top: 10px; }
+  .ppl li {
+    display: flex; align-items: flex-start; gap: 10px; min-width: 0;
+    padding: 10px 12px; border-radius: 10px; border: 1.5px solid var(--cell-line); background: var(--cell-bg);
+  }
   .ppl .pic { position: relative; flex: none; }
   .ppl .badge-st {
     position: absolute; right: -3px; bottom: -3px; width: 15px; height: 15px; border-radius: 50%;
@@ -251,9 +254,16 @@
   .s-progress .badge-st::after { content: ""; width: 5px; height: 5px; border-radius: 50%; background: #fff; }
   .s-rejected .badge-st { background: var(--red); }
   .s-waiting .badge-st { background: var(--surface); box-shadow: inset 0 0 0 2px var(--pending-ring); }
-  .chip.approved { background: var(--green-chip); color: var(--green-ink); }
-  .chip.progress { background: var(--blue-soft); color: var(--blue); }
-  .chip.rejected { background: var(--red-soft); color: #a3221d; }
+  /* the whole cell is wrapped in its status colour; the date chip stays neutral inside it */
+  .s-approved { --cell-bg: #eef8f2; --cell-line: #9fd4b3; }
+  .s-progress { --cell-bg: #edf4fe; --cell-line: #9cc0f5; }
+  .s-rejected { --cell-bg: #fdf0ef; --cell-line: #f0a9a4; }
+  .s-waiting  { --cell-bg: var(--surface); --cell-line: var(--line); }
+  .ppl .badge-st { border-color: var(--cell-bg); }
+  .ppl .chip { background: var(--surface); }
+  .chip.approved { color: var(--green-ink); }
+  .chip.progress { color: var(--blue); }
+  .chip.rejected { color: #a3221d; }
   .chip.waiting  { background: var(--gray-chip); color: var(--gray-ink); }
 
   /* ---------- Documents ---------- */
