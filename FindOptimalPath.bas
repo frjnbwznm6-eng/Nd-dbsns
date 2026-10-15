@@ -8,6 +8,12 @@ Option Explicit
 ' date/flight in the sheet named DATA_SHEET, and writes the TOP_N best
 ' distinct itineraries side by side on one sheet (OUT_SHEET).
 '
+' A prompt at the start lets you limit the search to routes that START in
+' one city: press Enter (ALL) for every route, or type a starting city such
+' as AMM (routes 9 and 10) to see the best options that start there. A
+' city-limited run writes to its own sheet, e.g. "Top 10 Routes - from AMM",
+' so it never overwrites the all-routes results.
+'
 ' "Best" is the same goal as before: maximize the MINIMUM slack (actual time
 ' spent in a city minus that city's required minimum) across the optimized
 ' destination cities, subject to the total trip time (first departure ->
@@ -141,8 +147,12 @@ Private nSeg As Long
 Private segFlight() As Long
 
 ' Routes: routeCity(r, 0 .. routeLegs(r)) are the city indexes in order.
+' routeOn(r) is False for routes excluded by the starting-city choice.
 Private routeCity() As Long
 Private routeLegs() As Long
+Private routeOn() As Boolean
+Private startFilter As String      ' "" = all routes, else the required starting city
+Private nRoutesOn As Long
 
 ' Every feasible (route, start) result, indexed 1..nCand.
 Private nCand As Long
@@ -162,6 +172,9 @@ Public Sub FindOptimalPath()
     Dim missingPairs As String
     Dim prevCalc As Long
 
+    Call InitRoutes
+    If Not AskStartCity() Then Exit Sub
+
     On Error GoTo Fail
     t0 = Timer
     budget = BudgetMinutes()
@@ -172,19 +185,17 @@ Public Sub FindOptimalPath()
     Application.StatusBar = "Reading '" & DATA_SHEET & "'..."
     If Not LoadFlights() Then GoTo Done
 
-    Call InitRoutes
-
     Application.StatusBar = "Building connections between destinations (" & nF & " flights)..."
     Call BuildCompositeLegs(missingPairs)
 
-    Application.StatusBar = "Searching all " & N_ROUTES & " routes on every start date..."
+    Application.StatusBar = "Searching " & ScopeText() & " on every start date..."
     Call SearchAllRoutes(budget)
 
     If nCand = 0 Then
         Application.Calculation = prevCalc
         Application.ScreenUpdating = True
         Application.StatusBar = False
-        MsgBox "No itinerary on any of the " & N_ROUTES & " routes fits within the " & _
+        MsgBox "No itinerary on " & ScopeText() & " fits within the " & _
                FormatDuration(CDbl(budget)) & " budget while meeting every minimum stay, " & _
                "open-hours rule and the " & MIN_CONNECTION_MINUTES & "-minute connection minimum." & _
                IIf(missingPairs <> "", vbCrLf & vbCrLf & "No connections at all were found for: " & missingPairs, ""), _
@@ -196,17 +207,17 @@ Public Sub FindOptimalPath()
     Call RankCandidates(rankIdx)
     Call GroupTopOptions(rankIdx, shown, alsoNote, nShown)
 
-    Application.StatusBar = "Writing '" & OUT_SHEET & "'..."
+    Application.StatusBar = "Writing '" & OutSheetName() & "'..."
     Call WriteTopSheet(shown, alsoNote, nShown, budget, missingPairs)
 
     Application.Calculation = prevCalc
     Application.ScreenUpdating = True
     Application.StatusBar = False
 
-    MsgBox "Searched " & N_ROUTES & " routes, " & nF & " flights, " & nCand & " complete itineraries under budget." & vbCrLf & vbCrLf & _
+    MsgBox "Searched " & ScopeText() & ", " & nF & " flights, " & nCand & " complete itineraries under budget." & vbCrLf & vbCrLf & _
            "Best: Route " & candRoute(shown(1)) & " -- worst-case slack " & FormatDuration(CDbl(candMin(shown(1)))) & _
            ", trip time " & FormatDuration(CDbl(candTime(shown(1)))) & " (budget " & FormatDuration(CDbl(budget)) & ")." & vbCrLf & vbCrLf & _
-           "The top " & nShown & " options are side by side on '" & OUT_SHEET & "'." & vbCrLf & _
+           "The top " & nShown & " options are side by side on '" & OutSheetName() & "'." & vbCrLf & _
            "(" & Format(Timer - t0, "0.0") & " s)", vbInformation, "Find Optimal Path"
     Exit Sub
 
@@ -283,7 +294,75 @@ Private Sub InitRoutes()
             routeCity(r, j) = CityIndex(parts(j))
         Next j
     Next r
+    ReDim routeOn(1 To N_ROUTES)
+    For r = 1 To N_ROUTES: routeOn(r) = True: Next r
+    startFilter = ""
+    nRoutesOn = N_ROUTES
 End Sub
+
+
+' Asks which starting city to search from. Enter (ALL) = every route; a
+' city code = only routes that start there. Returns False on Cancel/blank.
+Private Function AskStartCity() As Boolean
+    Dim r As Long, resp As String, starts As String, code As String, msg As String
+    starts = "|"
+    For r = 1 To N_ROUTES
+        code = CityCode(routeCity(r, 0))
+        If InStr(starts, "|" & code & "|") = 0 Then starts = starts & code & "|"
+    Next r
+
+    msg = "Which starting city should the search use?" & vbCrLf & vbCrLf & _
+          "ALL  = every route (press Enter)" & vbCrLf
+    For r = 1 To N_ROUTES
+        msg = msg & vbCrLf & "Route " & r & ":  " & RouteLabel(r)
+    Next r
+    msg = msg & vbCrLf & vbCrLf & "Or type a starting city: " & Replace(Mid(starts, 2, Len(starts) - 2), "|", ", ") & _
+          vbCrLf & "(Cancel or blank to stop.)"
+
+    Do
+        resp = UCase(Trim(InputBox(msg, "Choose Starting City", "ALL")))
+        If resp = "" Then Exit Function
+        If resp = "ALL" Then
+            startFilter = ""
+            Exit Do
+        End If
+        If InStr(starts, "|" & resp & "|") > 0 Then
+            startFilter = resp
+            Exit Do
+        End If
+        MsgBox "No route starts in '" & resp & "'. Enter ALL or one of: " & _
+               Replace(Mid(starts, 2, Len(starts) - 2), "|", ", "), vbExclamation
+    Loop
+
+    nRoutesOn = 0
+    For r = 1 To N_ROUTES
+        routeOn(r) = (startFilter = "" Or CityCode(routeCity(r, 0)) = startFilter)
+        If routeOn(r) Then nRoutesOn = nRoutesOn + 1
+    Next r
+    AskStartCity = True
+End Function
+
+
+' e.g. "all 12 routes" or "the 2 routes starting in AMM (9, 10)"
+Private Function ScopeText() As String
+    Dim r As Long, routeList As String
+    If startFilter = "" Then
+        ScopeText = "all " & N_ROUTES & " routes"
+    Else
+        For r = 1 To N_ROUTES
+            If routeOn(r) Then
+                If routeList <> "" Then routeList = routeList & ", "
+                routeList = routeList & r
+            End If
+        Next r
+        ScopeText = "the " & nRoutesOn & " route" & IIf(nRoutesOn = 1, "", "s") & " starting in " & startFilter & " (" & routeList & ")"
+    End If
+End Function
+
+
+Private Function OutSheetName() As String
+    If startFilter = "" Then OutSheetName = OUT_SHEET Else OutSheetName = OUT_SHEET & " - from " & startFilter
+End Function
 
 
 ' ===================== CONSTRAINTS (unchanged from the per-route version) =====================
@@ -920,7 +999,7 @@ Private Sub SearchAllRoutes(ByVal budget As Long)
     ReDim candChosen(1 To 1024)
 
     For r = 1 To N_ROUTES
-        ok = True
+        ok = routeOn(r)
         For j = 0 To routeLegs(r) - 1
             If pCount(pairIdx(routeCity(r, j), routeCity(r, j + 1))) = 0 Then ok = False
         Next j
@@ -1097,18 +1176,18 @@ Private Sub WriteTopSheet(shown() As Long, alsoNote() As String, ByVal nShown As
 
     Application.DisplayAlerts = False
     On Error Resume Next
-    ThisWorkbook.Sheets(OUT_SHEET).Delete
+    ThisWorkbook.Sheets(OutSheetName()).Delete
     On Error GoTo 0
     Application.DisplayAlerts = True
 
     Set outWs = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
-    outWs.Name = OUT_SHEET
+    outWs.Name = OutSheetName()
     ActiveWindow.DisplayGridlines = False
 
     lastCol = nShown * (CARD_COLS + 1) - 1
     With outWs.Range(outWs.Cells(1, 1), outWs.Cells(1, lastCol))
         .Merge
-        .Value = "TOP " & nShown & " ROUTES  --  all " & N_ROUTES & " routings, every start date  " & _
+        .Value = "TOP " & nShown & " ROUTES  --  " & ScopeText() & ", every start date  " & _
                  "|  ranked by worst-case slack, then total slack, then shortest trip"
         .Font.Bold = True
         .Font.Size = 14
