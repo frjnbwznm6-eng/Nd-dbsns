@@ -4,458 +4,293 @@ Option Explicit
 '===============================================================================
 ' FindOptimalPath
 '
-' Finds an optimal routing from the flight/train data on the sheet named
-' SHEET_NAME, maximizing the MINIMUM slack (actual time spent in a city minus
-' the required minimum) across the "optimized" connecting cities (MPU, CUN,
-' GIG, FCO, AMM, DEL, and PEK on routes 9-12), subject to the total trip time (first departure -> last
-' arrival) being UNDER the stated budget. On each run, a prompt asks which of
-' twelve supported routings to solve:
-'   Route 1: MPU -> CUZ -> CUN -> GIG -> FCO -> AMM -> DEL -> PEK                 (7 legs)
-'   Route 2: MPU -> CUZ -> GIG -> CUN -> FCO -> AMM -> DEL -> PEK                 (7 legs)
-'   Route 3: GIG -> CUZ -> MPU -> CUZ -> CUN -> FCO -> AMM -> DEL -> PEK          (8 legs)
-'   Route 4: CUN -> CUZ -> MPU -> CUZ -> GIG -> FCO -> AMM -> DEL -> PEK          (8 legs)
-'   Route 5: PEK -> DEL -> AMM -> FCO -> GIG -> CUN -> CUZ -> MPU                 (7 legs)
-'   Route 6: PEK -> DEL -> AMM -> FCO -> CUN -> GIG -> CUZ -> MPU                 (7 legs)
-'   Route 7: PEK -> DEL -> AMM -> FCO -> GIG -> CUZ -> MPU -> CUZ -> CUN          (8 legs)
-'   Route 8: PEK -> DEL -> AMM -> FCO -> CUN -> CUZ -> MPU -> CUZ -> GIG          (8 legs)
-'   Route 9: AMM -> DEL -> PEK -> FCO -> GIG -> CUZ -> MPU -> CUZ -> CUN          (8 legs)
-'  Route 10: AMM -> DEL -> PEK -> FCO -> CUN -> CUZ -> MPU -> CUZ -> GIG          (8 legs)
-'  Route 11: GIG -> CUZ -> MPU -> CUZ -> CUN -> FCO -> PEK -> DEL -> AMM          (8 legs)
-'  Route 12: CUN -> CUZ -> MPU -> CUZ -> GIG -> FCO -> PEK -> DEL -> AMM          (8 legs)
-' Routes 5-8 are routes 1-4 run backwards (PEK -> ... -> MPU/CUN/GIG instead of
-' the other way around). Routes 9-10 start at AMM and fly out to PEK before
-' doubling back west to FCO; routes 11-12 are routes 9-10 run backwards,
-' ending at AMM. On routes 9-12 PEK is a connection, with a 3-hour minimum
-' that counts toward the objective like any other optimized city.
-' On routes 1-8 PEK is only ever the first or last city, never a connection,
-' so its minimum never applies there. Routes 3, 4,
-' 7, 8, 9, 10, 11 & 12 detour out to MPU and back through
-' CUZ, so CUZ is visited (and evaluated as a connection) twice. Route length is
-' NOT a fixed constant -- N_LEGS is a module-level variable set by InitRoute
-' per route choice, and LegOrigin/LegDest are resized (ReDim) to match, since
-' VBA won't allow a fixed array bound to vary. Every other function already
-' keyed off N_LEGS, LegOrigin(0), and LegDest(N_LEGS-1) as runtime values, so
-' no other logic needed to change to support the longer OR the reversed
-' routes -- notably TZCorrectionMinutes (below) is a plain UTCOffset(dest) -
-' UTCOffset(origin) subtraction, which comes out negative for routes 5-8
-' (since PEK is far ahead of MPU/CUN/GIG) and so correctly ADDS time back
-' rather than subtracting it, with no special-casing required.
+' Searches EVERY supported routing (all 12 below) on EVERY possible start
+' date/flight in the sheet named DATA_SHEET, and writes the TOP_N best
+' distinct itineraries side by side on one sheet (OUT_SHEET).
 '
-' Because routes 3-12 all start somewhere other than MPU, that starting city
-' (GIG, CUN, PEK, or AMM) is only ever LegOrigin(0) -- it never appears as a
-' LegDest (a connection), so its minimum-stay requirement is never evaluated
-' for that route, exactly as intended ("no minimum needed for the city you
-' start in", which includes PEK on routes 5-8 and AMM on routes 9-10). No special-casing needed:
-' RequiredMinutes/IsOptimizedCity are only ever queried at LegDest(i), so
-' this falls out of the existing design automatically.
+' "Best" is the same goal as before: maximize the MINIMUM slack (actual time
+' spent in a city minus that city's required minimum) across the optimized
+' destination cities, subject to the total trip time (first departure ->
+' last arrival, time-zone adjusted) being UNDER the budget. Ties are broken
+' by TOTAL slack (sum over every optimized city), then by the shorter trip.
 '
-' CUZ is excluded from the objective (no minimum required there, and its
-' connection doesn't count toward the max-min slack), per spec. Every other
-' connecting city visited -- MPU, CUN, GIG, FCO, AMM, DEL, PEK -- has a required
-' minimum and counts toward the objective.
+'   Route 1: MPU -> CUZ -> CUN -> GIG -> FCO -> AMM -> DEL -> PEK
+'   Route 2: MPU -> CUZ -> GIG -> CUN -> FCO -> AMM -> DEL -> PEK
+'   Route 3: GIG -> CUZ -> MPU -> CUZ -> CUN -> FCO -> AMM -> DEL -> PEK
+'   Route 4: CUN -> CUZ -> MPU -> CUZ -> GIG -> FCO -> AMM -> DEL -> PEK
+'   Route 5: PEK -> DEL -> AMM -> FCO -> GIG -> CUN -> CUZ -> MPU
+'   Route 6: PEK -> DEL -> AMM -> FCO -> CUN -> GIG -> CUZ -> MPU
+'   Route 7: PEK -> DEL -> AMM -> FCO -> GIG -> CUZ -> MPU -> CUZ -> CUN
+'   Route 8: PEK -> DEL -> AMM -> FCO -> CUN -> CUZ -> MPU -> CUZ -> GIG
+'   Route 9: AMM -> DEL -> PEK -> FCO -> GIG -> CUZ -> MPU -> CUZ -> CUN
+'  Route 10: AMM -> DEL -> PEK -> FCO -> CUN -> CUZ -> MPU -> CUZ -> GIG
+'  Route 11: GIG -> CUZ -> MPU -> CUZ -> CUN -> FCO -> PEK -> DEL -> AMM
+'  Route 12: CUN -> CUZ -> MPU -> CUZ -> GIG -> FCO -> PEK -> DEL -> AMM
+' (See RouteText to add or change routes.)
 '
-' OPEN HOURS
-'   Some connecting cities also have daily open hours (see OpenWindow and
-'   OpenBuffers below). At such a connection, the usable part of the stay --
-'   from (arrival + an after-arrival buffer) to (next departure - a
-'   before-departure buffer) -- must overlap the city's open hours by MORE
-'   than zero minutes, on the local day(s) you are actually there. Like the
-'   minimum stays, this applies only at connections, never to a route's first
-'   or last city. FCO and CUZ have no open-hours rule.
+' THE DATA
+'   DATA_SHEET lists every individual flight (and the CUZ <-> MPU trains)
+'   separately: a trip from CUN to CUZ might be CUN -> LIM, then LIM -> CUZ.
+'   So the macro builds those connections itself. Rules for a connection at
+'   an in-between airport (one that isn't a main destination):
+'     - at least MIN_CONNECTION_MINUTES (60) between landing and the next
+'       departure, at the SAME airport (no airport changes mid-connection)
+'     - connections never pass through a main-destination city; a leg from
+'       one destination to the next only stops at in-between airports
+'   Main destinations are cities, not airports: AirportCity maps PKX
+'   (Beijing Daxing) to PEK, so landing at either Beijing airport counts as
+'   being in Beijing (the itinerary notes when you land at one and leave from
+'   the other).
+'
+' MINIMUM STAYS AND OPEN HOURS (unchanged)
+'   Every main destination you pass THROUGH has a required minimum stay
+'   (RequiredMinutes). Some also have daily open hours (OpenWindow and
+'   OpenBuffers): the part of the stay from (arrival + an after-arrival
+'   buffer) to (next departure - a before-departure buffer) must overlap the
+'   open hours by MORE than zero minutes, on the local day(s) you're there.
+'   The first and last city of a route have neither rule. CUZ has a 60-minute
+'   minimum that is enforced but doesn't count toward the ranking.
 '
 ' ALGORITHM
-'   The one truly free choice in the whole problem is which flight you start
-'   on -- every leg after that is a forced, greedy-optimal choice for whatever
-'   slack floor is being targeted. For a candidate floor S, requiring every
-'   optimized connection to have actual_layover >= required_minimum + S,
-'   Propagate walks the route choosing, at each step, the candidate flight
-'   with the EARLIEST ARRIVAL among those whose departure satisfies the
-'   floor. This greedy choice is optimal: an earlier arrival can only relax
-'   every downstream constraint, never tighten it (standard "earliest
-'   arrival" argument for time-expanded networks), so it minimizes total
-'   finish time for a fixed start and floor, and feasibility at a given
-'   (start, S) is monotonically non-increasing in S. The open-hours rule
-'   keeps this true: arriving earlier can only make the earliest allowed
-'   next departure earlier or the same (see EarliestOpenMin), never later.
-'
-'   BestForStart binary-searches S for ONE start to find that start's own
-'   best achievable floor. ComputeAllCandidates runs BestForStart for EVERY
-'   possible starting flight and sorts the results by minimum slack
-'   descending, then by TOTAL slack (sum across every optimized connection)
-'   descending as the tie-break. Rank 1 of that sort is the optimum: its
-'   minimum slack equals the true global maximum (proof: the path achieving
-'   the true optimum has ALL slacks >= that optimum by definition, so it
-'   would appear among the candidates at exactly that value; nothing higher
-'   is achievable by any start, or feasibility would have found it). Ranks 2+
-'   are reported in the output's Top-10 table, each the best COMPLETE
-'   itinerary for a different starting flight -- not an arbitrary partial
-'   trade-off -- so a route with slightly lower worst-case slack but much
-'   more slack everywhere else is visible for you to judge on its own merits,
-'   rather than the macro guessing at an exchange rate between the two.
+'   1. Door-to-door legs. For every pair of consecutive destinations used by
+'      any route (e.g. CUN -> CUZ), BuildCompositeLegs works out, for every
+'      flight leaving the first city, the EARLIEST possible arrival at the
+'      second city via any chain of connecting flights (each connection >= 60
+'      min). It does this with one backward scan over all flights per
+'      destination (sorted latest departure first), so the whole 64k-row
+'      sheet is processed a handful of times, not once per flight. Options
+'      that are beaten outright (another option leaves later and still
+'      arrives no later) are dropped. What's left is a short timetable per
+'      pair, shaped just like the old sheet's rows.
+'   2. Per route, per start. The one truly free choice is which option you
+'      start on. For a slack floor S, Propagate walks the route taking, at
+'      each city, the earliest-arriving option that leaves no sooner than the
+'      minimum stay (+ S, for optimized cities) and the open-hours rule
+'      allow. Arriving earlier can never hurt anything downstream, so this
+'      greedy choice is optimal, and BestForStart binary-searches the
+'      largest S that still fits the budget for that start.
+'   3. Ranking and grouping. Every (route, start) result is sorted by min
+'      slack, then total slack, then shorter trip. Results that are the same
+'      route through the same airports in the same order are ONE option: the
+'      best-ranked one is shown, and the other start dates it works on are
+'      listed in that option's "Also works starting" note (marked when the
+'      flight times on that date differ). The first TOP_N options are written.
 '
 ' REQUIRED SHEET LAYOUT
-'   A sheet named SHEET_NAME (below) containing, in row 1, headers named
-'   exactly: Origin, Destination, Departure Date, Arrival Date, Departure Time,
-'   Arrival Time. Column order doesn't matter; the macro finds columns by
-'   header name. A "Layover Duration" column is optional -- if present, its
-'   text (the mid-flight stopover at a connecting airport, e.g. "1 hr 35 min
-'   LIM") is carried through to the output's "Flight Layover" column purely
-'   for reference. That is NOT the same thing as the city-to-city gap this
-'   macro actually optimizes -- see the "Actual Layover" / "Slack" columns in
-'   the output's connections table for that.
+'   Row 1 of DATA_SHEET must have headers ORIGIN, DESTINATION,
+'   DEPARTURE_DATETIME, ARRIVAL_DATETIME (any order, any case).
+'   FLIGHT_DURATION_MINUTES is optional and only used for display.
+'   Times are local to each airport. Your source sheet is never modified.
 '
 ' OUTPUT
-'   A sheet named "Optimal Path - Route N" (N = 1-12, per your choice at the
-'   prompt) is (re)created each run with:
-'     - a summary banner (feasible/infeasible, total time, budget)
-'     - the chosen flights/trains, with a "Source Row" column pointing back to
-'       the exact row on SHEET_NAME so you can audit against your raw data
-'     - a per-city connection table showing arrival, departure, actual
-'       layover, required minimum, and slack, with the binding (tightest)
-'       connection highlighted gold and the rest shaded green
-'     - a trip timeline (linear, color-coded flight/train vs. layover view)
-'     - a Top-10 Alternative Routes table ranking every feasible starting
-'       flight by minimum slack then total slack, so you can compare the
-'       optimum against near-optimal alternatives that trade a little
-'       worst-case slack for a lot more slack elsewhere
-'   Your source sheet is never modified.
+'   A sheet named OUT_SHEET is (re)created each run with one "card" per
+'   option, side by side: rank, route, worst-case slack, total slack, total
+'   trip time, start/end, the other start dates it works on, and a
+'   step-by-step table of every flight, connection and destination stay.
+'   The tightest destination (the one that sets the worst-case slack) is
+'   gold, other counted destinations green, CUZ gray, connections light gray.
 '
 ' HOW TO USE
-'   Alt+F11 -> Insert -> Module -> paste this file's contents (or File ->
-'   Import File... and pick this .bas directly) -> F5 or Run > FindOptimalPath.
-'   Adjust SHEET_NAME / minimums / budget constants below if yours differ.
+'   Alt+F11 -> select the old modFindOptimalPath module -> File -> Remove ->
+'   then File -> Import File... and pick this .bas -> F5 or Run >
+'   FindOptimalPath. Adjust the constants below if yours differ.
 '===============================================================================
 
 ' --------------------------- CONFIGURATION ------------------------------------
-Private Const SHEET_NAME As String = "Flight Schedule"   ' <-- change if needed
+Private Const DATA_SHEET As String = "FULL FLIGHT DATA"   ' <-- change if needed
+Private Const OUT_SHEET As String = "Top 10 Routes"
+Private Const TOP_N As Long = 10
+
+Private Const MIN_CONNECTION_MINUTES As Long = 60   ' minimum layover between two flights at an in-between airport
 
 Private Const BUDGET_DAYS As Long = 5
 Private Const BUDGET_HOURS As Long = 14
 Private Const BUDGET_MINUTES As Long = 0
 
 Private Const MAX_S_CAP As Long = 43200   ' safety cap on the slack search, minutes (30 days)
-Private Const HUGE_BUDGET As Long = 2000000000   ' used only to find the true best-case total when infeasible
 
-' Route length varies by route choice (7 legs for routes 1-2 & 5-6, 8 for
-' routes 3-4 & 7-12), so this is a runtime variable, not a Const -- InitRoute sets it and
-' ReDims LegOrigin/LegDest to match before filling them in.
-Private N_LEGS As Long
-Private LegOrigin() As String
-Private LegDest() As String
-
-' Source rows whose Arrival Date/Time came out BEFORE their departure (once
-' time zones are accounted for) and were pushed forward a day -- see
-' BuildLeg. Reset each run and reported in the final message box.
-Private FixedArrivalRows As String
+Private Const N_ROUTES As Long = 12
+Private Const N_CITIES As Long = 8        ' MPU, CUZ, CUN, GIG, FCO, AMM, DEL, PEK -- see CityCode
+Private Const CARD_COLS As Long = 10      ' columns per output card (plus one blank spacer column)
 ' -------------------------------------------------------------------------------
+
+' Airports, indexed 1..nAp. apCity is the main-destination city index
+' (1..N_CITIES) for airports that belong to one, else 0.
+Private nAp As Long
+Private apCode() As String
+Private apCity() As Long
+Private apLookup As Collection
+
+' Individual flights/trains from DATA_SHEET, indexed 1..nF. Times are whole
+' minutes since VBA's day 0 (local time at that airport).
+Private nF As Long
+Private fOrig() As Long, fDest() As Long
+Private fDep() As Long, fArr() As Long
+Private fDur() As Long, fRow() As Long
+
+' Door-to-door options ("composite legs") between consecutive destinations.
+' Pair p's options are cDep/cArr(pStart(p) .. pStart(p) + pCount(p) - 1),
+' sorted by departure, with departure AND arrival strictly increasing. Each
+' option's flights are segFlight(cSegStart(c) .. cSegStart(c) + cSegCount(c) - 1).
+Private pairIdx() As Long          ' (1 To N_CITIES, 1 To N_CITIES) -> pair number, 0 if unused
+Private nPairs As Long
+Private pFrom() As Long, pTo() As Long, pStart() As Long, pCount() As Long
+Private nC As Long
+Private cDep() As Long, cArr() As Long, cSegStart() As Long, cSegCount() As Long
+Private nSeg As Long
+Private segFlight() As Long
+
+' Routes: routeCity(r, 0 .. routeLegs(r)) are the city indexes in order.
+Private routeCity() As Long
+Private routeLegs() As Long
+
+' Every feasible (route, start) result, indexed 1..nCand.
+Private nCand As Long
+Private candRoute() As Long
+Private candMin() As Long, candTot() As Long, candTime() As Long
+Private candChosen() As Variant    ' each a (0 To legs-1) Long array of composite-leg indexes
+
+' Scratch for the flight sort (sorted by fDep ascending).
+Private order() As Long
 
 
 Public Sub FindOptimalPath()
-    Dim ws As Worksheet
-    Dim data As Variant
-    Dim lastRow As Long, lastCol As Long, c As Long
-    Dim colOrigin As Long, colDest As Long, colDepDate As Long, colArrDate As Long, colDepTime As Long, colArrTime As Long, colLayover As Long
-    Dim LegData() As Variant
-    Dim i As Long
-    Dim budget As Long
-    Dim finalChosen() As Long, finalTotal As Double, Sstar As Long
-    Dim tmpChosen() As Long, tmpTotal As Double
-    Dim candMinSlack() As Double, candTotalSlack() As Double, candTotalTime() As Double
-    Dim candChosen() As Variant, candCount As Long
-    Dim routeChoice As Long
-    Dim resp As String
-    Dim routeLabel As String, outSheetName As String
+    Dim budget As Long, t0 As Single
+    Dim i As Long, nShown As Long
+    Dim rankIdx() As Long
+    Dim shown() As Long, alsoNote() As String
+    Dim missingPairs As String
+    Dim prevCalc As Long
 
-    Dim promptMsg As String
-    promptMsg = "Which route do you want to solve? Enter 1-12:" & vbCrLf & vbCrLf & _
-                "1)  MPU -> CUZ -> CUN -> GIG -> FCO -> AMM -> DEL -> PEK" & vbCrLf & _
-                "2)  MPU -> CUZ -> GIG -> CUN -> FCO -> AMM -> DEL -> PEK" & vbCrLf & _
-                "3)  GIG -> CUZ -> MPU -> CUZ -> CUN -> FCO -> AMM -> DEL -> PEK" & vbCrLf & _
-                "4)  CUN -> CUZ -> MPU -> CUZ -> GIG -> FCO -> AMM -> DEL -> PEK" & vbCrLf & _
-                "5)  PEK -> DEL -> AMM -> FCO -> GIG -> CUN -> CUZ -> MPU" & vbCrLf & _
-                "6)  PEK -> DEL -> AMM -> FCO -> CUN -> GIG -> CUZ -> MPU" & vbCrLf & _
-                "7)  PEK -> DEL -> AMM -> FCO -> GIG -> CUZ -> MPU -> CUZ -> CUN" & vbCrLf & _
-                "8)  PEK -> DEL -> AMM -> FCO -> CUN -> CUZ -> MPU -> CUZ -> GIG" & vbCrLf & _
-                "9)  AMM -> DEL -> PEK -> FCO -> GIG -> CUZ -> MPU -> CUZ -> CUN" & vbCrLf & _
-                "10) AMM -> DEL -> PEK -> FCO -> CUN -> CUZ -> MPU -> CUZ -> GIG" & vbCrLf & _
-                "11) GIG -> CUZ -> MPU -> CUZ -> CUN -> FCO -> PEK -> DEL -> AMM" & vbCrLf & _
-                "12) CUN -> CUZ -> MPU -> CUZ -> GIG -> FCO -> PEK -> DEL -> AMM" & vbCrLf & vbCrLf & _
-                "(Leave blank or Cancel to stop without running.)"
-    Do
-        resp = InputBox(promptMsg, "Choose Route")
-        If resp = "" Then Exit Sub   ' Cancel, or blank + OK
-        If resp = "1" Or resp = "2" Or resp = "3" Or resp = "4" Or _
-           resp = "5" Or resp = "6" Or resp = "7" Or resp = "8" Or _
-           resp = "9" Or resp = "10" Or resp = "11" Or resp = "12" Then Exit Do
-        MsgBox "Please enter a number from 1 to 12.", vbExclamation
-    Loop
-    routeChoice = CLng(resp)
-
-    Call InitRoute(routeChoice)
-    FixedArrivalRows = ""
-    ReDim LegData(0 To N_LEGS - 1)
-    routeLabel = "Route " & routeChoice & ": " & LegOrigin(0)
-    For i = 0 To N_LEGS - 1
-        routeLabel = routeLabel & " -> " & LegDest(i)
-    Next i
-    outSheetName = "Optimal Path - Route " & routeChoice
-
+    On Error GoTo Fail
+    t0 = Timer
     budget = BudgetMinutes()
+    prevCalc = Application.Calculation
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
 
-    On Error Resume Next
-    Set ws = ThisWorkbook.Sheets(SHEET_NAME)
-    On Error GoTo 0
-    If ws Is Nothing Then
-        MsgBox "Could not find a sheet named '" & SHEET_NAME & "'." & vbCrLf & _
-               "Update the SHEET_NAME constant at the top of the module.", vbCritical
+    Application.StatusBar = "Reading '" & DATA_SHEET & "'..."
+    If Not LoadFlights() Then GoTo Done
+
+    Call InitRoutes
+
+    Application.StatusBar = "Building connections between destinations (" & nF & " flights)..."
+    Call BuildCompositeLegs(missingPairs)
+
+    Application.StatusBar = "Searching all " & N_ROUTES & " routes on every start date..."
+    Call SearchAllRoutes(budget)
+
+    If nCand = 0 Then
+        Application.Calculation = prevCalc
+        Application.ScreenUpdating = True
+        Application.StatusBar = False
+        MsgBox "No itinerary on any of the " & N_ROUTES & " routes fits within the " & _
+               FormatDuration(CDbl(budget)) & " budget while meeting every minimum stay, " & _
+               "open-hours rule and the " & MIN_CONNECTION_MINUTES & "-minute connection minimum." & _
+               IIf(missingPairs <> "", vbCrLf & vbCrLf & "No connections at all were found for: " & missingPairs, ""), _
+               vbExclamation
         Exit Sub
     End If
 
-    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
-    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
-    If lastRow < 2 Then
-        MsgBox "'" & SHEET_NAME & "' has no data rows below the header.", vbCritical
-        Exit Sub
-    End If
-    data = ws.Range(ws.Cells(1, 1), ws.Cells(lastRow, lastCol)).Value
+    Application.StatusBar = "Ranking " & nCand & " itineraries..."
+    Call RankCandidates(rankIdx)
+    Call GroupTopOptions(rankIdx, shown, alsoNote, nShown)
 
-    colOrigin = 0: colDest = 0: colDepDate = 0: colArrDate = 0: colDepTime = 0: colArrTime = 0: colLayover = 0
-    For c = 1 To UBound(data, 2)
-        Select Case Trim(CStr(data(1, c)))
-            Case "Origin": colOrigin = c
-            Case "Destination": colDest = c
-            Case "Departure Date": colDepDate = c
-            Case "Arrival Date": colArrDate = c
-            Case "Departure Time": colDepTime = c
-            Case "Arrival Time": colArrTime = c
-            Case "Layover Duration": colLayover = c   ' optional -- mid-flight stopover text, not required
-        End Select
+    Application.StatusBar = "Writing '" & OUT_SHEET & "'..."
+    Call WriteTopSheet(shown, alsoNote, nShown, budget, missingPairs)
+
+    Application.Calculation = prevCalc
+    Application.ScreenUpdating = True
+    Application.StatusBar = False
+
+    MsgBox "Searched " & N_ROUTES & " routes, " & nF & " flights, " & nCand & " complete itineraries under budget." & vbCrLf & vbCrLf & _
+           "Best: Route " & candRoute(shown(1)) & " -- worst-case slack " & FormatDuration(CDbl(candMin(shown(1)))) & _
+           ", trip time " & FormatDuration(CDbl(candTime(shown(1)))) & " (budget " & FormatDuration(CDbl(budget)) & ")." & vbCrLf & vbCrLf & _
+           "The top " & nShown & " options are side by side on '" & OUT_SHEET & "'." & vbCrLf & _
+           "(" & Format(Timer - t0, "0.0") & " s)", vbInformation, "Find Optimal Path"
+    Exit Sub
+
+Done:
+    Application.Calculation = prevCalc
+    Application.ScreenUpdating = True
+    Application.StatusBar = False
+    Exit Sub
+
+Fail:
+    Application.Calculation = prevCalc
+    Application.ScreenUpdating = True
+    Application.StatusBar = False
+    MsgBox "FindOptimalPath stopped with an error: " & Err.Description, vbCritical
+End Sub
+
+
+' ===================== ROUTES AND CITIES =====================
+Private Function RouteText(ByVal r As Long) As String
+    Select Case r
+        Case 1: RouteText = "MPU CUZ CUN GIG FCO AMM DEL PEK"
+        Case 2: RouteText = "MPU CUZ GIG CUN FCO AMM DEL PEK"
+        Case 3: RouteText = "GIG CUZ MPU CUZ CUN FCO AMM DEL PEK"
+        Case 4: RouteText = "CUN CUZ MPU CUZ GIG FCO AMM DEL PEK"
+        Case 5: RouteText = "PEK DEL AMM FCO GIG CUN CUZ MPU"
+        Case 6: RouteText = "PEK DEL AMM FCO CUN GIG CUZ MPU"
+        Case 7: RouteText = "PEK DEL AMM FCO GIG CUZ MPU CUZ CUN"
+        Case 8: RouteText = "PEK DEL AMM FCO CUN CUZ MPU CUZ GIG"
+        Case 9: RouteText = "AMM DEL PEK FCO GIG CUZ MPU CUZ CUN"
+        Case 10: RouteText = "AMM DEL PEK FCO CUN CUZ MPU CUZ GIG"
+        Case 11: RouteText = "GIG CUZ MPU CUZ CUN FCO PEK DEL AMM"
+        Case 12: RouteText = "CUN CUZ MPU CUZ GIG FCO PEK DEL AMM"
+    End Select
+End Function
+
+
+Private Function RouteLabel(ByVal r As Long) As String
+    RouteLabel = Replace(RouteText(r), " ", " -> ")
+End Function
+
+
+Private Function CityCode(ByVal c As Long) As String
+    CityCode = Choose(c, "MPU", "CUZ", "CUN", "GIG", "FCO", "AMM", "DEL", "PEK")
+End Function
+
+
+Private Function CityIndex(ByVal code As String) As Long
+    Dim c As Long
+    For c = 1 To N_CITIES
+        If CityCode(c) = code Then CityIndex = c: Exit Function
     Next c
+    CityIndex = 0
+End Function
 
-    If colOrigin = 0 Or colDest = 0 Or colDepDate = 0 Or colArrDate = 0 Or colDepTime = 0 Or colArrTime = 0 Then
-        MsgBox "Could not find all required headers (Origin, Destination, Departure Date, " & _
-               "Arrival Date, Departure Time, Arrival Time) in row 1 of '" & SHEET_NAME & "'.", vbCritical
-        Exit Sub
-    End If
 
-    For i = 0 To N_LEGS - 1
-        LegData(i) = BuildLeg(data, colOrigin, colDest, colDepDate, colArrDate, colDepTime, colArrTime, colLayover, _
-                               UCase(LegOrigin(i)), UCase(LegDest(i)))
-        If IsEmpty(LegData(i)) Then
-            MsgBox "No rows found for " & LegOrigin(i) & " -> " & LegDest(i) & " on '" & SHEET_NAME & "'. Cannot continue.", vbCritical
-            Exit Sub
-        End If
-    Next i
+' The main-destination city an airport belongs to ("" if none). Add a line
+' here if another airport should count as one of the destinations.
+Private Function AirportCity(ByVal code As String) As String
+    Select Case code
+        Case "PKX": AirportCity = "PEK"   ' Beijing Daxing counts as Beijing
+        Case Else: AirportCity = code
+    End Select
+End Function
 
-    ' --- Search every possible starting flight, once, for a consistent answer ---
-    Call ComputeAllCandidates(LegData, budget, candMinSlack, candTotalSlack, candTotalTime, candChosen, candCount)
 
-    If candCount = 0 Then
-        ' Find the true best-case total, ignoring the budget. If even that
-        ' fails, no starting flight can be chained all the way to the end
-        ' (e.g. the schedule runs out before the last leg), so there is no
-        ' itinerary to show at all.
-        If Not FeasibleAtS(LegData, 0, HUGE_BUDGET, tmpChosen, tmpTotal) Then
-            ' Remove any results sheet from an earlier run so a stale itinerary isn't left looking current.
-            Application.DisplayAlerts = False
-            On Error Resume Next
-            ThisWorkbook.Sheets(outSheetName).Delete
-            On Error GoTo 0
-            Application.DisplayAlerts = True
-            MsgBox routeLabel & vbCrLf & vbCrLf & _
-                   "No complete itinerary exists for this route: no starting flight can be connected " & _
-                   "all the way to " & LegDest(N_LEGS - 1) & " while meeting every minimum stay and open-hours rule, " & _
-                   "no matter how long the trip takes. The schedule on '" & SHEET_NAME & "' likely " & _
-                   "runs out of flights before the final leg." & vbCrLf & vbCrLf & _
-                   FixedArrivalsNote(), vbExclamation
-            Exit Sub
-        End If
-        Call WriteResults(LegData, tmpChosen, 0, tmpTotal, budget, False, routeLabel, outSheetName)
-        MsgBox routeLabel & vbCrLf & vbCrLf & _
-               "No itinerary fits within the " & FormatDuration(CDbl(budget)) & " budget." & vbCrLf & _
-               "Tightest possible total, time-zone adjusted (zero extra slack beyond the minimums): " & FormatDuration(tmpTotal) & vbCrLf & _
-               "That is over budget by " & FormatDuration(tmpTotal - budget) & "." & vbCrLf & vbCrLf & _
-               FixedArrivalsNote() & _
-               "See the '" & outSheetName & "' sheet for the closest itinerary found.", vbExclamation
-        Exit Sub
-    End If
-
-    ' Rank 1 of the sorted candidates (max min-slack, tie-broken by max total
-    ' slack -- see ComputeAllCandidates) IS the optimal path.
-    Sstar = CLng(Round(candMinSlack(1), 0))
-    finalTotal = candTotalTime(1)
-    finalChosen = candChosen(1)
-
-    Call WriteResults(LegData, finalChosen, Sstar, finalTotal, budget, True, routeLabel, outSheetName)
-    Call WriteAlternativesTable(LegData, outSheetName, candMinSlack, candTotalSlack, candTotalTime, candChosen, candCount)
-    MsgBox routeLabel & vbCrLf & vbCrLf & _
-           "Optimal path found." & vbCrLf & _
-           "Guaranteed minimum layover slack: " & Sstar & " min (" & FormatDuration(CDbl(Sstar)) & ")." & vbCrLf & _
-           "Total trip time, time-zone adjusted: " & FormatDuration(finalTotal) & "  (budget " & FormatDuration(CDbl(budget)) & ")." & vbCrLf & vbCrLf & _
-           "See the '" & outSheetName & "' sheet for full details, including a Top 10 Alternative Routes table " & _
-           "further down so you can compare the trade-off between worst-case slack and total slack." & _
-           IIf(FixedArrivalRows = "", "", vbCrLf & vbCrLf & FixedArrivalsNote()), vbInformation
+Private Sub InitRoutes()
+    Dim r As Long, j As Long, parts() As String
+    ReDim routeCity(1 To N_ROUTES, 0 To 20)
+    ReDim routeLegs(1 To N_ROUTES)
+    For r = 1 To N_ROUTES
+        parts = Split(RouteText(r), " ")
+        routeLegs(r) = UBound(parts)
+        For j = 0 To UBound(parts)
+            routeCity(r, j) = CityIndex(parts(j))
+        Next j
+    Next r
 End Sub
 
 
-' routeChoice 1: MPU -> CUZ -> CUN -> GIG -> FCO -> AMM -> DEL -> PEK                 (7 legs)
-' routeChoice 2: MPU -> CUZ -> GIG -> CUN -> FCO -> AMM -> DEL -> PEK                 (7 legs)
-' routeChoice 3: GIG -> CUZ -> MPU -> CUZ -> CUN -> FCO -> AMM -> DEL -> PEK          (8 legs)
-' routeChoice 4: CUN -> CUZ -> MPU -> CUZ -> GIG -> FCO -> AMM -> DEL -> PEK          (8 legs)
-' routeChoice 5: PEK -> DEL -> AMM -> FCO -> GIG -> CUN -> CUZ -> MPU                 (7 legs)
-' routeChoice 6: PEK -> DEL -> AMM -> FCO -> CUN -> GIG -> CUZ -> MPU                 (7 legs)
-' routeChoice 7: PEK -> DEL -> AMM -> FCO -> GIG -> CUZ -> MPU -> CUZ -> CUN          (8 legs)
-' routeChoice 8: PEK -> DEL -> AMM -> FCO -> CUN -> CUZ -> MPU -> CUZ -> GIG          (8 legs)
-' routeChoice 9: AMM -> DEL -> PEK -> FCO -> GIG -> CUZ -> MPU -> CUZ -> CUN          (8 legs)
-' routeChoice 10: AMM -> DEL -> PEK -> FCO -> CUN -> CUZ -> MPU -> CUZ -> GIG         (8 legs)
-' routeChoice 11: GIG -> CUZ -> MPU -> CUZ -> CUN -> FCO -> PEK -> DEL -> AMM         (8 legs)
-' routeChoice 12: CUN -> CUZ -> MPU -> CUZ -> GIG -> FCO -> PEK -> DEL -> AMM         (8 legs)
-' Routes 5-8 are routes 1-4 traversed in reverse. Routes 9-10 are routes 7-8
-' started from AMM instead, with PEK visited as a mid-route connection.
-' Routes 11-12 are routes 9-10 traversed in reverse. RequiredMinutes/IsOptimizedCity
-' key off city name only, and TZCorrectionMinutes/every other function keys off
-' N_LEGS, LegOrigin(0) and LegDest(N_LEGS-1) as runtime values, so no other
-' change is needed to support any of these orderings, the longer 8-leg routes,
-' or the reversed direction.
-Private Sub InitRoute(routeChoice As Long)
-    Select Case routeChoice
-        Case 1, 2, 5, 6
-            N_LEGS = 7
-        Case 3, 4, 7, 8, 9, 10, 11, 12
-            N_LEGS = 8
-    End Select
-    ReDim LegOrigin(0 To N_LEGS - 1)
-    ReDim LegDest(0 To N_LEGS - 1)
+' ===================== CONSTRAINTS (unchanged from the per-route version) =====================
 
-    Select Case routeChoice
-        Case 1
-            LegOrigin(0) = "MPU": LegDest(0) = "CUZ"
-            LegOrigin(1) = "CUZ": LegDest(1) = "CUN"
-            LegOrigin(2) = "CUN": LegDest(2) = "GIG"
-            LegOrigin(3) = "GIG": LegDest(3) = "FCO"
-            LegOrigin(4) = "FCO": LegDest(4) = "AMM"
-            LegOrigin(5) = "AMM": LegDest(5) = "DEL"
-            LegOrigin(6) = "DEL": LegDest(6) = "PEK"
-        Case 2
-            LegOrigin(0) = "MPU": LegDest(0) = "CUZ"
-            LegOrigin(1) = "CUZ": LegDest(1) = "GIG"
-            LegOrigin(2) = "GIG": LegDest(2) = "CUN"
-            LegOrigin(3) = "CUN": LegDest(3) = "FCO"
-            LegOrigin(4) = "FCO": LegDest(4) = "AMM"
-            LegOrigin(5) = "AMM": LegDest(5) = "DEL"
-            LegOrigin(6) = "DEL": LegDest(6) = "PEK"
-        Case 3
-            LegOrigin(0) = "GIG": LegDest(0) = "CUZ"
-            LegOrigin(1) = "CUZ": LegDest(1) = "MPU"
-            LegOrigin(2) = "MPU": LegDest(2) = "CUZ"
-            LegOrigin(3) = "CUZ": LegDest(3) = "CUN"
-            LegOrigin(4) = "CUN": LegDest(4) = "FCO"
-            LegOrigin(5) = "FCO": LegDest(5) = "AMM"
-            LegOrigin(6) = "AMM": LegDest(6) = "DEL"
-            LegOrigin(7) = "DEL": LegDest(7) = "PEK"
-        Case 4
-            LegOrigin(0) = "CUN": LegDest(0) = "CUZ"
-            LegOrigin(1) = "CUZ": LegDest(1) = "MPU"
-            LegOrigin(2) = "MPU": LegDest(2) = "CUZ"
-            LegOrigin(3) = "CUZ": LegDest(3) = "GIG"
-            LegOrigin(4) = "GIG": LegDest(4) = "FCO"
-            LegOrigin(5) = "FCO": LegDest(5) = "AMM"
-            LegOrigin(6) = "AMM": LegDest(6) = "DEL"
-            LegOrigin(7) = "DEL": LegDest(7) = "PEK"
-        Case 5
-            LegOrigin(0) = "PEK": LegDest(0) = "DEL"
-            LegOrigin(1) = "DEL": LegDest(1) = "AMM"
-            LegOrigin(2) = "AMM": LegDest(2) = "FCO"
-            LegOrigin(3) = "FCO": LegDest(3) = "GIG"
-            LegOrigin(4) = "GIG": LegDest(4) = "CUN"
-            LegOrigin(5) = "CUN": LegDest(5) = "CUZ"
-            LegOrigin(6) = "CUZ": LegDest(6) = "MPU"
-        Case 6
-            LegOrigin(0) = "PEK": LegDest(0) = "DEL"
-            LegOrigin(1) = "DEL": LegDest(1) = "AMM"
-            LegOrigin(2) = "AMM": LegDest(2) = "FCO"
-            LegOrigin(3) = "FCO": LegDest(3) = "CUN"
-            LegOrigin(4) = "CUN": LegDest(4) = "GIG"
-            LegOrigin(5) = "GIG": LegDest(5) = "CUZ"
-            LegOrigin(6) = "CUZ": LegDest(6) = "MPU"
-        Case 7
-            LegOrigin(0) = "PEK": LegDest(0) = "DEL"
-            LegOrigin(1) = "DEL": LegDest(1) = "AMM"
-            LegOrigin(2) = "AMM": LegDest(2) = "FCO"
-            LegOrigin(3) = "FCO": LegDest(3) = "GIG"
-            LegOrigin(4) = "GIG": LegDest(4) = "CUZ"
-            LegOrigin(5) = "CUZ": LegDest(5) = "MPU"
-            LegOrigin(6) = "MPU": LegDest(6) = "CUZ"
-            LegOrigin(7) = "CUZ": LegDest(7) = "CUN"
-        Case 8
-            LegOrigin(0) = "PEK": LegDest(0) = "DEL"
-            LegOrigin(1) = "DEL": LegDest(1) = "AMM"
-            LegOrigin(2) = "AMM": LegDest(2) = "FCO"
-            LegOrigin(3) = "FCO": LegDest(3) = "CUN"
-            LegOrigin(4) = "CUN": LegDest(4) = "CUZ"
-            LegOrigin(5) = "CUZ": LegDest(5) = "MPU"
-            LegOrigin(6) = "MPU": LegDest(6) = "CUZ"
-            LegOrigin(7) = "CUZ": LegDest(7) = "GIG"
-        Case 9
-            LegOrigin(0) = "AMM": LegDest(0) = "DEL"
-            LegOrigin(1) = "DEL": LegDest(1) = "PEK"
-            LegOrigin(2) = "PEK": LegDest(2) = "FCO"
-            LegOrigin(3) = "FCO": LegDest(3) = "GIG"
-            LegOrigin(4) = "GIG": LegDest(4) = "CUZ"
-            LegOrigin(5) = "CUZ": LegDest(5) = "MPU"
-            LegOrigin(6) = "MPU": LegDest(6) = "CUZ"
-            LegOrigin(7) = "CUZ": LegDest(7) = "CUN"
-        Case 10
-            LegOrigin(0) = "AMM": LegDest(0) = "DEL"
-            LegOrigin(1) = "DEL": LegDest(1) = "PEK"
-            LegOrigin(2) = "PEK": LegDest(2) = "FCO"
-            LegOrigin(3) = "FCO": LegDest(3) = "CUN"
-            LegOrigin(4) = "CUN": LegDest(4) = "CUZ"
-            LegOrigin(5) = "CUZ": LegDest(5) = "MPU"
-            LegOrigin(6) = "MPU": LegDest(6) = "CUZ"
-            LegOrigin(7) = "CUZ": LegDest(7) = "GIG"
-        Case 11
-            LegOrigin(0) = "GIG": LegDest(0) = "CUZ"
-            LegOrigin(1) = "CUZ": LegDest(1) = "MPU"
-            LegOrigin(2) = "MPU": LegDest(2) = "CUZ"
-            LegOrigin(3) = "CUZ": LegDest(3) = "CUN"
-            LegOrigin(4) = "CUN": LegDest(4) = "FCO"
-            LegOrigin(5) = "FCO": LegDest(5) = "PEK"
-            LegOrigin(6) = "PEK": LegDest(6) = "DEL"
-            LegOrigin(7) = "DEL": LegDest(7) = "AMM"
-        Case 12
-            LegOrigin(0) = "CUN": LegDest(0) = "CUZ"
-            LegOrigin(1) = "CUZ": LegDest(1) = "MPU"
-            LegOrigin(2) = "MPU": LegDest(2) = "CUZ"
-            LegOrigin(3) = "CUZ": LegDest(3) = "GIG"
-            LegOrigin(4) = "GIG": LegDest(4) = "FCO"
-            LegOrigin(5) = "FCO": LegDest(5) = "PEK"
-            LegOrigin(6) = "PEK": LegDest(6) = "DEL"
-            LegOrigin(7) = "DEL": LegDest(7) = "AMM"
-    End Select
-End Sub
-
-
-' --------------------------- TIME ZONE DATA -----------------------------------
-' Flight/train schedules record LOCAL time at each airport. An arrival and the
-' next departure AT THE SAME CITY can be subtracted directly -- the offset is
-' identical on both sides and cancels out -- so the connection/layover figures
-' elsewhere in this module need no adjustment.
-'
-' But the OVERALL trip length (first departure -> final arrival) and any single
-' leg's flight duration cross time zones, so naive subtraction of two local
-' timestamps is off by the difference in UTC offset between the two endpoints.
-' This table supplies that offset (minutes from UTC) for every airport in the
-' route, valid for November 2026 -- none of these observe DST, so a fixed
-' offset is safe for the whole trip regardless of the exact date:
-'   MPU/CUZ (Peru)               UTC-5     Peru has not observed DST since 1994
-'   CUN (Quintana Roo, Mexico)   UTC-5     "Zona Sureste", fixed since 2015
-'   GIG (Rio de Janeiro, Brazil) UTC-3     Brazil abolished DST in 2019
-'   FCO (Rome, Italy)            UTC+1     CET; EU summer time ends late Oct
-'   AMM (Amman, Jordan)          UTC+3     Jordan went to permanent DST-time Oct 2022
-'   DEL (New Delhi, India)       UTC+5:30  India has never observed DST
-'   PEK (Beijing, China)         UTC+8     one national time zone, no DST
-' If the route ever changes to include a different airport, add it here.
+' Fixed UTC offsets for the main destinations (no DST in Nov/Dec for any of
+' them; Rome is on CET after late October). Only used to time-zone adjust
+' the total trip time between the first and last city.
 Private Function UTCOffsetMinutes(city As String) As Long
     Select Case UCase(city)
         Case "MPU", "CUZ", "CUN": UTCOffsetMinutes = -5 * 60
@@ -469,16 +304,13 @@ Private Function UTCOffsetMinutes(city As String) As Long
 End Function
 
 
-' Net correction to subtract from a naive (local-clock) total-trip-time figure
-' to get the TRUE elapsed time: the final destination sits this many minutes
-' further "ahead" of UTC than the origin, so local clocks read further forward
-' by that much over the course of the trip, on top of time actually elapsed.
-Private Function TZCorrectionMinutes() As Long
-    TZCorrectionMinutes = UTCOffsetMinutes(LegDest(N_LEGS - 1)) - UTCOffsetMinutes(LegOrigin(0))
+Private Function TZCorrectionMinutes(ByVal r As Long) As Long
+    TZCorrectionMinutes = UTCOffsetMinutes(CityCode(routeCity(r, routeLegs(r)))) - _
+                          UTCOffsetMinutes(CityCode(routeCity(r, 0)))
 End Function
-' -------------------------------------------------------------------------------
 
 
+' Minimum stay at each destination you pass through.
 Private Function RequiredMinutes(city As String) As Long
     Select Case UCase(city)
         Case "MPU": RequiredMinutes = 2 * 60
@@ -488,29 +320,18 @@ Private Function RequiredMinutes(city As String) As Long
         Case "FCO": RequiredMinutes = 3 * 60 + 0
         Case "AMM": RequiredMinutes = 7 * 60 + 38
         Case "DEL": RequiredMinutes = 9 * 60 + 0
-        Case "PEK": RequiredMinutes = 3 * 60 + 0   ' only a connection on routes 9-12
-        Case Else: RequiredMinutes = 0   ' any other city: no minimum
+        Case "PEK": RequiredMinutes = 3 * 60 + 0
+        Case Else: RequiredMinutes = 0
     End Select
 End Function
 
 
-' A city here means "this connection counts toward the max-min slack
-' objective." CUZ is excluded even though it now has a real 60-minute
-' minimum (see RequiredMinutes above): that minimum is still enforced as a
-' hard floor on every CUZ connection (Propagate always applies
-' RequiredMinutes regardless of this function), it just isn't stretched by
-' the slack search the way CUN/GIG/FCO/AMM/DEL/MPU/PEK are. CUZ appears twice in
-' routes 3-4 and 7-12 -- both occurrences are handled independently and
-' correctly, since this is keyed by city name only. Note that a route's OWN
-' starting city (e.g. GIG in route 3, PEK in route 5, AMM in route 9) never gets evaluated
-' here in the first place, since RequiredMinutes/IsOptimizedCity are only
-' ever queried at LegDest(i) -- a route's starting city is LegOrigin(0) and
-' is never also a LegDest unless the route revisits it later (which none of
-' these do for their own start city).
+' Destinations whose slack counts toward the ranking. CUZ's 60-minute
+' minimum is still enforced; its extra time just isn't counted.
 Private Function IsOptimizedCity(city As String) As Boolean
     Select Case UCase(city)
         Case "MPU", "CUN", "GIG", "FCO", "AMM", "DEL", "PEK": IsOptimizedCity = True
-        Case Else: IsOptimizedCity = False   ' CUZ excluded from the max-min objective
+        Case Else: IsOptimizedCity = False
     End Select
 End Function
 
@@ -565,17 +386,10 @@ Private Function OpenWindow(ByVal city As String, ByVal wd As Long, ByVal k As L
 End Function
 
 
-' A Date as whole minutes since VBA's day 0, so open-hours checks compare
-' exact integers instead of floating-point day fractions.
-Private Function ToMin(ByVal dt As Date) As Long
-    ToMin = CLng(Round(CDbl(dt) * 1440#, 0))
-End Function
-
-
 ' The earliest minute >= tMin at which city is open: tMin itself if it falls
 ' inside an open window, otherwise the start of the next window. Returns -1
-' if the city has no open window in the following 8 days. Non-decreasing in
-' tMin, which is what keeps the earliest-arrival search optimal.
+' if nothing opens within 8 days. Never decreases as tMin increases, which is
+' what keeps the earliest-arrival search optimal.
 Private Function EarliestOpenMin(ByVal city As String, ByVal tMin As Long) As Long
     Dim dayN As Long, k As Long, ws As Long, we As Long, sMin As Long, eMin As Long
     For dayN = tMin \ 1440 To tMin \ 1440 + 8
@@ -640,296 +454,421 @@ End Function
 
 
 Private Function FormatDuration(totalMin As Double) As String
-    Dim t As Long, d As Long, h As Long, m As Long
+    Dim t As Long, d As Long, h As Long, m As Long, neg As Boolean
     t = CLng(Round(totalMin, 0))
+    If t < 0 Then neg = True: t = -t
     d = t \ 1440
     h = (t Mod 1440) \ 60
     m = t Mod 60
-    FormatDuration = d & "d " & h & "h " & m & "m"
+    FormatDuration = IIf(neg, "-", "") & d & "d " & h & "h " & m & "m"
 End Function
 
 
-' Combines a date cell and a time cell into one Date/time value. Deliberately
-' avoids TimeValue(), which requires a String or Date and throws "Type
-' mismatch" if the time is stored as a raw Double (day-fraction) instead --
-' which is how this workbook's Departure/Arrival Time columns are stored.
-' A VBA Date is internally a Double (integer part = day, fractional part =
-' time-of-day), so this works uniformly whether the cell holds a true
-' Date/Time or a plain numeric fraction.
-Private Function TryCombine(dateVal As Variant, timeVal As Variant, ByRef outDT As Date) As Boolean
+Private Function MinToDate(ByVal m As Long) As Date
+    MinToDate = CDate(m / 1440#)
+End Function
+
+
+' ===================== LOADING THE DATA =====================
+
+' A date/time cell (a real Date, a day-number Double, or date text) as whole
+' minutes since VBA's day 0.
+Private Function TryMinutes(v As Variant, ByRef outMin As Long) As Boolean
     On Error GoTo Fail
-    Dim dPart As Double, tRaw As Double, tPart As Double
-
-    dPart = Int(CDbl(dateVal))
-    tRaw = CDbl(timeVal)
-    tPart = tRaw - Int(tRaw)
-
-    outDT = CDate(dPart + tPart)
-    TryCombine = True
+    Dim d As Double
+    If IsEmpty(v) Then Exit Function
+    If VarType(v) = vbString Then
+        If Trim(v) = "" Then Exit Function
+        d = CDbl(CDate(v))
+    Else
+        d = CDbl(v)
+    End If
+    outMin = CLng(Round(d * 1440#, 0))
+    TryMinutes = True
     Exit Function
 Fail:
-    TryCombine = False
+    TryMinutes = False
 End Function
 
 
-' Returns Empty if no rows match; otherwise a Variant holding a
-' (1 To n, 1 To 4) array: col1=DepDT, col2=ArrDT, col3=source row number,
-' col4=Flight Layover text (mid-flight stopover, e.g. "1 hr 35 min LIM" --
-' blank if colLayover=0 (column not present on the sheet) or the cell is
-' empty, e.g. a nonstop flight or a train leg), sorted ascending by DepDT.
-Private Function BuildLeg(data As Variant, colOrigin As Long, colDest As Long, _
-                           colDepDate As Long, colArrDate As Long, colDepTime As Long, colArrTime As Long, _
-                           colLayover As Long, originCode As String, destCode As String) As Variant
-    Dim i As Long, n As Long, cnt As Long
-    Dim depDT As Date, arrDT As Date
-    Dim isMatch As Boolean
-    Dim layoverVal As String
-    Dim tzGap As Long
-    Dim result() As Variant, final() As Variant
-
-    n = UBound(data, 1)
-    cnt = 0
-    tzGap = UTCOffsetMinutes(destCode) - UTCOffsetMinutes(originCode)
-
-    For i = 2 To n   ' row 1 = headers
-        isMatch = False
-        If Not IsEmpty(data(i, colOrigin)) And Not IsEmpty(data(i, colDest)) Then
-            If UCase(Trim(CStr(data(i, colOrigin)))) = originCode And UCase(Trim(CStr(data(i, colDest)))) = destCode Then
-                isMatch = True
-            End If
+Private Function ApIndex(ByVal code As String) As Long
+    Dim idx As Long
+    idx = 0
+    On Error Resume Next
+    idx = apLookup.Item(code)
+    On Error GoTo 0
+    If idx = 0 Then
+        nAp = nAp + 1
+        If nAp > UBound(apCode) Then
+            ReDim Preserve apCode(1 To 2 * nAp)
+            ReDim Preserve apCity(1 To 2 * nAp)
         End If
+        apCode(nAp) = code
+        apCity(nAp) = CityIndex(AirportCity(code))
+        apLookup.Add nAp, code
+        idx = nAp
+    End If
+    ApIndex = idx
+End Function
 
-        If isMatch Then
-            If TryCombine(data(i, colDepDate), data(i, colDepTime), depDT) And _
-               TryCombine(data(i, colArrDate), data(i, colArrTime), arrDT) Then
-                ' An arrival that lands at or before its own departure (in
-                ' true elapsed time, i.e. after removing the time-zone gap)
-                ' is an overnight trip whose Arrival Date was entered as the
-                ' departure day. Taken literally it looks like the fastest
-                ' option of all, so the earliest-arrival search picks it and
-                ' the itinerary appears to run backwards in time. Push it
-                ' forward a day at a time until it's after the departure.
-                If (arrDT - depDT) * 1440# - tzGap <= 0 Then
-                    Do While (arrDT - depDT) * 1440# - tzGap <= 0
-                        arrDT = arrDT + 1
-                    Loop
-                    If FixedArrivalRows <> "" Then FixedArrivalRows = FixedArrivalRows & ", "
-                    FixedArrivalRows = FixedArrivalRows & i
-                End If
-                cnt = cnt + 1
-                ReDim Preserve result(1 To 4, 1 To cnt)   ' last dimension only -- VBA's ReDim Preserve rule
-                result(1, cnt) = depDT
-                result(2, cnt) = arrDT
-                result(3, cnt) = i
 
-                layoverVal = ""
-                If colLayover > 0 Then
-                    If Not IsEmpty(data(i, colLayover)) Then layoverVal = Trim(CStr(data(i, colLayover)))
+Private Function LoadFlights() As Boolean
+    Dim ws As Worksheet, data As Variant
+    Dim lastRow As Long, lastCol As Long, c As Long, i As Long, n As Long
+    Dim colO As Long, colD As Long, colDep As Long, colArr As Long, colDur As Long
+    Dim o As String, d As String, depM As Long, arrM As Long
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Sheets(DATA_SHEET)
+    On Error GoTo 0
+    If ws Is Nothing Then
+        MsgBox "Could not find a sheet named '" & DATA_SHEET & "'." & vbCrLf & _
+               "Update the DATA_SHEET constant at the top of the module.", vbCritical
+        Exit Function
+    End If
+
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+    If lastRow < 2 Then
+        MsgBox "'" & DATA_SHEET & "' has no data rows below the header.", vbCritical
+        Exit Function
+    End If
+    data = ws.Range(ws.Cells(1, 1), ws.Cells(lastRow, lastCol)).Value
+
+    For c = 1 To UBound(data, 2)
+        Select Case UCase(Trim(CStr(data(1, c))))
+            Case "ORIGIN": colO = c
+            Case "DESTINATION": colD = c
+            Case "DEPARTURE_DATETIME": colDep = c
+            Case "ARRIVAL_DATETIME": colArr = c
+            Case "FLIGHT_DURATION_MINUTES": colDur = c   ' optional, display only
+        End Select
+    Next c
+    If colO = 0 Or colD = 0 Or colDep = 0 Or colArr = 0 Then
+        MsgBox "Could not find all required headers (ORIGIN, DESTINATION, DEPARTURE_DATETIME, " & _
+               "ARRIVAL_DATETIME) in row 1 of '" & DATA_SHEET & "'.", vbCritical
+        Exit Function
+    End If
+
+    n = UBound(data, 1) - 1
+    nAp = 0
+    ReDim apCode(1 To 256)
+    ReDim apCity(1 To 256)
+    Set apLookup = New Collection
+    nF = 0
+    ReDim fOrig(1 To n): ReDim fDest(1 To n)
+    ReDim fDep(1 To n): ReDim fArr(1 To n)
+    ReDim fDur(1 To n): ReDim fRow(1 To n)
+
+    For i = 2 To UBound(data, 1)
+        If Not IsEmpty(data(i, colO)) And Not IsEmpty(data(i, colD)) Then
+            o = UCase(Trim(CStr(data(i, colO))))
+            d = UCase(Trim(CStr(data(i, colD))))
+            If o <> "" And d <> "" And o <> d Then
+                If TryMinutes(data(i, colDep), depM) And TryMinutes(data(i, colArr), arrM) Then
+                    nF = nF + 1
+                    fOrig(nF) = ApIndex(o)
+                    fDest(nF) = ApIndex(d)
+                    fDep(nF) = depM
+                    fArr(nF) = arrM
+                    fRow(nF) = i
+                    fDur(nF) = -1
+                    If colDur > 0 Then
+                        If IsNumeric(data(i, colDur)) Or IsDate(data(i, colDur)) Then
+                            On Error Resume Next
+                            fDur(nF) = CLng(CDbl(data(i, colDur)))
+                            On Error GoTo 0
+                        End If
+                    End If
                 End If
-                result(4, cnt) = layoverVal
             End If
         End If
     Next i
 
-    If cnt = 0 Then Exit Function   ' returns Empty
-
-    ReDim final(1 To cnt, 1 To 4)
-    For i = 1 To cnt
-        final(i, 1) = result(1, i)
-        final(i, 2) = result(2, i)
-        final(i, 3) = result(3, i)
-        final(i, 4) = result(4, i)
-    Next i
-
-    Call SortLegByDep(final)
-    BuildLeg = final
+    If nF = 0 Then
+        MsgBox "No usable flight rows were found on '" & DATA_SHEET & "'.", vbCritical
+        Exit Function
+    End If
+    LoadFlights = True
 End Function
 
 
-' Message-box text listing the source rows BuildLeg corrected, or "" if none.
-Private Function FixedArrivalsNote() As String
-    If FixedArrivalRows = "" Then Exit Function
-    FixedArrivalsNote = "Note: these '" & SHEET_NAME & "' rows had an arrival before their departure " & _
-                        "and were treated as arriving the next day: row(s) " & FixedArrivalRows & "." & vbCrLf & _
-                        "Consider correcting their Arrival Date on the sheet." & vbCrLf & vbCrLf
-End Function
+' ===================== DOOR-TO-DOOR LEGS =====================
 
-
-' Simple, obviously-correct insertion sort by column 1 (DepDT) ascending.
-' n is at most a few hundred rows here, so O(n^2) is instant.
-Private Sub SortLegByDep(arr As Variant)
-    Dim n As Long, i As Long, j As Long
-    Dim keyDep As Date, keyArr As Date, keyRow As Long, keyLayover As String
-
-    n = UBound(arr, 1)
-    For i = 2 To n
-        keyDep = arr(i, 1): keyArr = arr(i, 2): keyRow = arr(i, 3): keyLayover = arr(i, 4)
-        j = i - 1
-        Do While j >= 1
-            If arr(j, 1) <= keyDep Then Exit Do
-            arr(j + 1, 1) = arr(j, 1)
-            arr(j + 1, 2) = arr(j, 2)
-            arr(j + 1, 3) = arr(j, 3)
-            arr(j + 1, 4) = arr(j, 4)
-            j = j - 1
+' Sorts order(lo..hi) by fDep ascending.
+Private Sub SortOrderByDep(ByVal lo As Long, ByVal hi As Long)
+    Dim i As Long, j As Long, pivot As Long, tmp As Long
+    Do While lo < hi
+        i = lo: j = hi
+        pivot = fDep(order((lo + hi) \ 2))
+        Do While i <= j
+            Do While fDep(order(i)) < pivot: i = i + 1: Loop
+            Do While fDep(order(j)) > pivot: j = j - 1: Loop
+            If i <= j Then
+                tmp = order(i): order(i) = order(j): order(j) = tmp
+                i = i + 1: j = j - 1
+            End If
         Loop
-        arr(j + 1, 1) = keyDep
-        arr(j + 1, 2) = keyArr
-        arr(j + 1, 3) = keyRow
-        arr(j + 1, 4) = keyLayover
-    Next i
+        ' recurse into the smaller half, loop on the larger (keeps the stack shallow)
+        If j - lo < hi - i Then
+            If lo < j Then SortOrderByDep lo, j
+            lo = i
+        Else
+            If i < hi Then SortOrderByDep i, hi
+            hi = j
+        End If
+    Loop
 End Sub
 
 
-' Among rows in legArr departing at or after minDepMin (whole minutes, see
-' ToMin), returns the row index (1..n) with the earliest ArrDT, or 0 if none.
-Private Function EarliestAfterIdx(legArr As Variant, minDepMin As Long) As Long
-    Dim n As Long, i As Long
-    Dim bestIdx As Long, bestArr As Date
+' For every pair of consecutive destinations on any route, builds the list
+' of door-to-door options (see the ALGORITHM notes at the top).
+'
+' For one destination city B at a time, flights are scanned latest departure
+' first. For flight i, best(i) = the earliest arrival at B possible if you
+' board flight i: its own arrival if it lands in B, otherwise the best
+' option among flights leaving its arrival airport at least
+' MIN_CONNECTION_MINUTES after it lands. Those later flights were all
+' scanned already, and each airport keeps a running "best from here if you
+' leave at or after time t" list (lDep/lBest/lVia, in scan order, so
+' departures are decreasing and a binary search finds time t). Flights
+' landing at any other main destination are never used as connections.
+'
+' (If a short westbound hop lands earlier on the local clock than it left,
+' a connection right after it can be missed, never invented -- the result
+' is always a real, valid itinerary.)
+Private Sub BuildCompositeLegs(ByRef missingPairs As String)
+    Dim i As Long, k As Long, r As Long, j As Long, p As Long, B As Long
+    Dim apStart() As Long, apFill() As Long, apTot() As Long
+    Dim lDep() As Long, lBest() As Long, lVia() As Long
+    Dim best() As Long, via() As Long
+    Dim o As Long, d As Long, v As Long, vv As Long, t As Long
+    Dim lo As Long, hi As Long, m As Long, blk As Long, cnt As Long, pos As Long
+    Dim usedAsTarget() As Boolean
 
-    bestIdx = 0
-    n = UBound(legArr, 1)
-    For i = 1 To n
-        If ToMin(legArr(i, 1)) >= minDepMin Then
-            If bestIdx = 0 Then
-                bestIdx = i
-                bestArr = legArr(i, 2)
-            ElseIf legArr(i, 2) < bestArr Then
-                bestIdx = i
-                bestArr = legArr(i, 2)
+    ' --- pairs used by the routes ---
+    ReDim pairIdx(1 To N_CITIES, 1 To N_CITIES)
+    ReDim usedAsTarget(1 To N_CITIES)
+    nPairs = 0
+    For r = 1 To N_ROUTES
+        For j = 0 To routeLegs(r) - 1
+            If pairIdx(routeCity(r, j), routeCity(r, j + 1)) = 0 Then
+                nPairs = nPairs + 1
+                pairIdx(routeCity(r, j), routeCity(r, j + 1)) = nPairs
+            End If
+            usedAsTarget(routeCity(r, j + 1)) = True
+        Next j
+    Next r
+    ReDim pFrom(1 To nPairs): ReDim pTo(1 To nPairs)
+    ReDim pStart(1 To nPairs): ReDim pCount(1 To nPairs)
+    For o = 1 To N_CITIES
+        For d = 1 To N_CITIES
+            If pairIdx(o, d) > 0 Then pFrom(pairIdx(o, d)) = o: pTo(pairIdx(o, d)) = d
+        Next d
+    Next o
+
+    ' --- flights sorted by departure ---
+    ReDim order(1 To nF)
+    For i = 1 To nF: order(i) = i: Next i
+    SortOrderByDep 1, nF
+
+    ' --- one slot block per departure airport ---
+    ReDim apStart(1 To nAp): ReDim apFill(1 To nAp): ReDim apTot(1 To nAp)
+    For i = 1 To nF: apTot(fOrig(i)) = apTot(fOrig(i)) + 1: Next i
+    pos = 1
+    For o = 1 To nAp: apStart(o) = pos: pos = pos + apTot(o): Next o
+    ReDim lDep(1 To nF): ReDim lBest(1 To nF): ReDim lVia(1 To nF)
+    ReDim best(1 To nF): ReDim via(1 To nF)
+
+    nC = 0: nSeg = 0
+    ReDim cDep(1 To 1024): ReDim cArr(1 To 1024)
+    ReDim cSegStart(1 To 1024): ReDim cSegCount(1 To 1024)
+    ReDim segFlight(1 To 4096)
+
+    For B = 1 To N_CITIES
+        If usedAsTarget(B) Then
+            For o = 1 To nAp: apFill(o) = 0: Next o
+            For k = nF To 1 Step -1
+                i = order(k)
+                best(i) = 0
+                o = fOrig(i): d = fDest(i)
+                If apCity(o) <> B Then
+                    v = 0
+                    If apCity(d) = B Then
+                        v = fArr(i): via(i) = 0
+                    ElseIf apCity(d) = 0 Then
+                        cnt = apFill(d)
+                        If cnt > 0 Then
+                            blk = apStart(d)
+                            t = fArr(i) + MIN_CONNECTION_MINUTES
+                            lo = 0: hi = cnt   ' -> number of entries with departure >= t
+                            Do While lo < hi
+                                m = (lo + hi) \ 2
+                                If lDep(blk + m) >= t Then lo = m + 1 Else hi = m
+                            Loop
+                            If lo > 0 Then v = lBest(blk + lo - 1): via(i) = lVia(blk + lo - 1)
+                        End If
+                    End If
+                    If v > 0 Then
+                        best(i) = v
+                        pos = apStart(o) + apFill(o)
+                        lDep(pos) = fDep(i)
+                        If apFill(o) > 0 Then
+                            If lBest(pos - 1) <= v Then
+                                lBest(pos) = lBest(pos - 1): lVia(pos) = lVia(pos - 1)
+                            Else
+                                lBest(pos) = v: lVia(pos) = i
+                            End If
+                        Else
+                            lBest(pos) = v: lVia(pos) = i
+                        End If
+                        apFill(o) = apFill(o) + 1
+                    End If
+                End If
+            Next k
+
+            ' --- extract each pair (A -> B) ---
+            For p = 1 To nPairs
+                If pTo(p) = B Then Call ExtractPair(p, best, via)
+            Next p
+        End If
+    Next B
+
+    missingPairs = ""
+    For p = 1 To nPairs
+        If pCount(p) = 0 Then
+            If missingPairs <> "" Then missingPairs = missingPairs & ", "
+            missingPairs = missingPairs & CityCode(pFrom(p)) & " -> " & CityCode(pTo(p))
+        End If
+    Next p
+End Sub
+
+
+' Keeps only the options for pair p that nothing beats (no other option
+' leaves at the same time or later and arrives at the same time or earlier),
+' then stores them sorted by departure along with their flight chains.
+Private Sub ExtractPair(ByVal p As Long, best() As Long, via() As Long)
+    Dim k As Long, i As Long, nk As Long, runMin As Long, q As Long, f As Long
+    Dim kFirst() As Long
+    ReDim kFirst(1 To nF)
+    nk = 0
+    For k = nF To 1 Step -1          ' latest departure first
+        i = order(k)
+        If apCity(fOrig(i)) = pFrom(p) And best(i) > 0 Then
+            If nk = 0 Then
+                nk = 1: kFirst(1) = i: runMin = best(i)
+            ElseIf best(i) < runMin Then
+                If fDep(kFirst(nk)) = fDep(i) Then
+                    kFirst(nk) = i         ' same departure, earlier arrival: replace
+                Else
+                    nk = nk + 1: kFirst(nk) = i
+                End If
+                runMin = best(i)
             End If
         End If
-    Next i
-    EarliestAfterIdx = bestIdx
+    Next k
+
+    pStart(p) = nC + 1
+    pCount(p) = nk
+    For q = nk To 1 Step -1          ' store earliest departure first
+        i = kFirst(q)
+        nC = nC + 1
+        If nC > UBound(cDep) Then
+            ReDim Preserve cDep(1 To 2 * nC): ReDim Preserve cArr(1 To 2 * nC)
+            ReDim Preserve cSegStart(1 To 2 * nC): ReDim Preserve cSegCount(1 To 2 * nC)
+        End If
+        cDep(nC) = fDep(i)
+        cArr(nC) = best(i)
+        cSegStart(nC) = nSeg + 1
+        cSegCount(nC) = 0
+        f = i
+        Do While f > 0
+            nSeg = nSeg + 1
+            If nSeg > UBound(segFlight) Then
+                ReDim Preserve segFlight(1 To 2 * nSeg)
+            End If
+            segFlight(nSeg) = f
+            cSegCount(nC) = cSegCount(nC) + 1
+            If apCity(fDest(f)) = pTo(p) Then Exit Do
+            f = via(f)
+        Loop
+    Next q
+End Sub
+
+
+' First option of pair p leaving at or after minute t (it also arrives
+' earliest, since arrivals increase with departures), or 0 if none.
+Private Function FirstOptionAtOrAfter(ByVal p As Long, ByVal t As Long) As Long
+    Dim lo As Long, hi As Long, m As Long
+    lo = pStart(p): hi = pStart(p) + pCount(p)
+    Do While lo < hi
+        m = (lo + hi) \ 2
+        If cDep(m) < t Then lo = m + 1 Else hi = m
+    Loop
+    If lo < pStart(p) + pCount(p) Then FirstOptionAtOrAfter = lo Else FirstOptionAtOrAfter = 0
 End Function
 
 
-' Walks all N_LEGS legs starting from LegData(0)'s row `startIdx`, requiring
-' each connection's layover to be >= its required minimum (+ S for optimized
-' cities), and, for cities with open hours, the stay between the buffers to
-' overlap those hours by more than zero minutes. Returns False if any leg
-' has no qualifying flight.
-Private Function Propagate(LegData() As Variant, startIdx As Long, S As Long, _
-                            ByRef chosenIdx() As Long, ByRef totalMinutes As Double) As Boolean
-    Dim i As Long, idx As Long, req As Long
-    Dim arrDT As Date, minDepMin As Long
-    Dim curLeg As Variant, nextLeg As Variant
-    Dim cityAt As String, afterArr As Long, beforeDep As Long, openAt As Long
+' ===================== SEARCH =====================
 
-    ReDim chosenIdx(0 To N_LEGS - 1)
-    chosenIdx(0) = startIdx
-    curLeg = LegData(0)
-    arrDT = curLeg(startIdx, 2)
+' Walks route r from starting option startC, requiring every stay to be at
+' least its minimum (+ S at optimized cities) and, where a city has open
+' hours, the buffered stay to overlap them. Returns False if the chain
+' can't be completed.
+Private Function Propagate(ByVal r As Long, ByVal startC As Long, ByVal S As Long, _
+                           ByRef chosen() As Long, ByRef total As Long) As Boolean
+    Dim j As Long, idx As Long, req As Long, arr As Long, minDep As Long
+    Dim city As String, afterArr As Long, beforeDep As Long, openAt As Long
 
-    For i = 1 To N_LEGS - 1
-        cityAt = LegDest(i - 1)
-        req = RequiredMinutes(cityAt)
-        If IsOptimizedCity(cityAt) Then req = req + S
-        minDepMin = ToMin(arrDT) + req
-
-        ' Open hours: the first open minute at or after (arrival + buffer)
-        ' must come strictly before (departure - buffer), i.e. departure >=
-        ' that minute + buffer + 1, for a non-zero overlap.
-        If OpenBuffers(cityAt, afterArr, beforeDep) Then
-            openAt = EarliestOpenMin(cityAt, ToMin(arrDT) + afterArr)
-            If openAt < 0 Then
-                Propagate = False
-                Exit Function
-            End If
-            If openAt + beforeDep + 1 > minDepMin Then minDepMin = openAt + beforeDep + 1
+    ReDim chosen(0 To routeLegs(r) - 1)
+    chosen(0) = startC
+    arr = cArr(startC)
+    For j = 1 To routeLegs(r) - 1
+        city = CityCode(routeCity(r, j))
+        req = RequiredMinutes(city)
+        If IsOptimizedCity(city) Then req = req + S
+        minDep = arr + req
+        If OpenBuffers(city, afterArr, beforeDep) Then
+            openAt = EarliestOpenMin(city, arr + afterArr)
+            If openAt < 0 Then Exit Function
+            If openAt + beforeDep + 1 > minDep Then minDep = openAt + beforeDep + 1
         End If
-
-        nextLeg = LegData(i)
-        idx = EarliestAfterIdx(nextLeg, minDepMin)
-        If idx = 0 Then
-            Propagate = False
-            Exit Function
-        End If
-        chosenIdx(i) = idx
-        arrDT = nextLeg(idx, 2)
-    Next i
-
-    curLeg = LegData(0)
-    ' Raw local-clock difference minus the origin/destination time-zone gap
-    ' gives the TRUE elapsed time -- see TZCorrectionMinutes above. Since the
-    ' correction is a constant (fixed start/end cities), minimizing this
-    ' still minimizes the raw difference too, so the earlier-arrival greedy
-    ' logic above remains valid unchanged.
-    totalMinutes = ((arrDT - curLeg(startIdx, 1)) * 1440#) - TZCorrectionMinutes()
+        idx = FirstOptionAtOrAfter(pairIdx(routeCity(r, j), routeCity(r, j + 1)), minDep)
+        If idx = 0 Then Exit Function
+        chosen(j) = idx
+        arr = cArr(idx)
+    Next j
+    total = arr - cDep(startC) - TZCorrectionMinutes(r)
     Propagate = True
 End Function
 
 
-' True if ANY MPU->CUZ start yields a full chain with total < budget under
-' floor S. Also returns (via ByRef) the min-total such path found.
-Private Function FeasibleAtS(LegData() As Variant, S As Long, budget As Long, _
-                              ByRef bestChosen() As Long, ByRef bestTotal As Double) As Boolean
-    Dim leg0 As Variant
-    Dim n0 As Long, s0 As Long
-    Dim chosenIdx() As Long
-    Dim total As Double
-    Dim found As Boolean
-
-    leg0 = LegData(0)
-    n0 = UBound(leg0, 1)
-
-    found = False
-    bestTotal = -1
-    For s0 = 1 To n0
-        If Propagate(LegData, s0, S, chosenIdx, total) Then
-            If total < budget Then
-                If Not found Then
-                    found = True
-                    bestTotal = total
-                    bestChosen = chosenIdx
-                ElseIf total < bestTotal Then
-                    bestTotal = total
-                    bestChosen = chosenIdx
-                End If
-            End If
-        End If
-    Next s0
-    FeasibleAtS = found
+' A fresh copy of a Long array (explicit, so results never share storage
+' with the scratch array Propagate keeps re-filling).
+Private Function CopyLongs(src() As Long) As Variant
+    Dim dst() As Long, i As Long
+    ReDim dst(LBound(src) To UBound(src))
+    For i = LBound(src) To UBound(src): dst(i) = src(i): Next i
+    CopyLongs = dst
 End Function
 
+' For one route and starting option: the largest slack floor S that still
+' completes under budget, and that itinerary's min/total slack and time.
+Private Function BestForStart(ByVal r As Long, ByVal startC As Long, ByVal budget As Long, _
+                              ByRef outChosen() As Long, ByRef outMin As Long, _
+                              ByRef outTot As Long, ByRef outTime As Long) As Boolean
+    Dim lo As Long, hi As Long, mid As Long, total As Long
+    Dim chosen() As Long, bestChosen() As Long, bestTotal As Long
 
-' Runs a per-start binary search -- identical logic to the global one in
-' FindOptimalPath, just restricted to ONE starting flight -- to find the best
-' achievable itinerary FOR THAT START: the maximum floor S such that
-' Propagate(startIdx, S) is feasible and under budget. By the same argument
-' that makes the global search correct (see the header comment block), that
-' itinerary's true minimum slack among optimized connections equals exactly
-' that S. This also sums every optimized connection's slack into a TOTAL,
-' which the global search never needed but comparing alternative routes does
-' -- two routes can share the same worst-case slack while differing a lot on
-' how generous the OTHER connections are.
-Private Function BestForStart(LegData() As Variant, startIdx As Long, budget As Long, _
-                               ByRef outChosen() As Long, ByRef outMinSlack As Double, _
-                               ByRef outTotalSlack As Double, ByRef outTotalTime As Double) As Boolean
-    Dim lo As Long, hi As Long, mid As Long
-    Dim chosenIdx() As Long, total As Double
-    Dim bestChosen() As Long, bestTotal As Double
+    If Not Propagate(r, startC, 0, chosen, total) Then Exit Function
+    If Not (total < budget) Then Exit Function
+    bestChosen = CopyLongs(chosen): bestTotal = total
 
-    If Not Propagate(LegData, startIdx, 0, chosenIdx, total) Then
-        BestForStart = False
-        Exit Function
-    End If
-    If Not (total < budget) Then
-        BestForStart = False
-        Exit Function
-    End If
-    bestChosen = chosenIdx
-    bestTotal = total
-
-    lo = 0
-    hi = 1
+    lo = 0: hi = 1
     Do While hi <= MAX_S_CAP
-        If Propagate(LegData, startIdx, hi, chosenIdx, total) Then
+        If Propagate(r, startC, hi, chosen, total) Then
             If total < budget Then
-                lo = hi
-                bestChosen = chosenIdx
-                bestTotal = total
-                hi = hi * 2
+                lo = hi: bestChosen = CopyLongs(chosen): bestTotal = total: hi = hi * 2
             Else
                 Exit Do
             End If
@@ -938,14 +877,11 @@ Private Function BestForStart(LegData() As Variant, startIdx As Long, budget As 
         End If
     Loop
     If hi > MAX_S_CAP Then hi = MAX_S_CAP + 1
-
     Do While hi - lo > 1
         mid = (lo + hi) \ 2
-        If Propagate(LegData, startIdx, mid, chosenIdx, total) Then
+        If Propagate(r, startC, mid, chosen, total) Then
             If total < budget Then
-                lo = mid
-                bestChosen = chosenIdx
-                bestTotal = total
+                lo = mid: bestChosen = CopyLongs(chosen): bestTotal = total
             Else
                 hi = mid
             End If
@@ -954,488 +890,428 @@ Private Function BestForStart(LegData() As Variant, startIdx As Long, budget As 
         End If
     Loop
 
-    outChosen = bestChosen
-    outTotalTime = bestTotal
-
-    Dim i As Long, req As Long, thisSlack As Double
-    Dim leg As Variant, nextLeg As Variant
-    Dim first As Boolean
-    first = True
-    outTotalSlack = 0
-    outMinSlack = 0
-    For i = 0 To N_LEGS - 2
-        If IsOptimizedCity(LegDest(i)) Then
-            req = RequiredMinutes(LegDest(i))
-            leg = LegData(i)
-            nextLeg = LegData(i + 1)
-            thisSlack = (nextLeg(outChosen(i + 1), 1) - leg(outChosen(i), 2)) * 1440# - req
-            outTotalSlack = outTotalSlack + thisSlack
+    outChosen = CopyLongs(bestChosen)
+    outTime = bestTotal
+    Dim j As Long, sl As Long, first As Boolean, city As String
+    first = True: outTot = 0: outMin = 0
+    For j = 1 To routeLegs(r) - 1
+        city = CityCode(routeCity(r, j))
+        If IsOptimizedCity(city) Then
+            sl = cDep(outChosen(j)) - cArr(outChosen(j - 1)) - RequiredMinutes(city)
+            outTot = outTot + sl
             If first Then
-                outMinSlack = thisSlack
-                first = False
-            ElseIf thisSlack < outMinSlack Then
-                outMinSlack = thisSlack
+                outMin = sl: first = False
+            ElseIf sl < outMin Then
+                outMin = sl
             End If
         End If
-    Next i
-
+    Next j
     BestForStart = True
 End Function
 
 
-' ===================== ALL-CANDIDATES SEARCH =====================
-' The one truly free choice in this whole problem is which flight you start
-' on -- every leg after that is then the forced, greedy-optimal choice for
-' whatever slack floor is being targeted (see Propagate). So rather than a
-' single global search that reports just one "the" answer, this runs
-' BestForStart (a per-start binary search) for EVERY possible starting
-' flight, keeping every one that's feasible and under budget, and sorts the
-' results by minimum slack descending, then TOTAL slack descending as the
-' tie-break. Rank 1 of that sort is used as THE optimal path (fed to
-' WriteResults) and the same sorted list is reused for the Top-10 table below
-' -- one computation, one consistent answer, instead of two separate searches
-' that could disagree on how to break a tie.
-'
-' This tie-break is the "smarter" answer to a real question: among routes
-' that share the same worst-case connection, prefer the one that's also most
-' generous everywhere else, rather than an arbitrary pick (e.g. shortest
-' total trip time) that ignores how much slack the rest of the trip has.
-Private Sub ComputeAllCandidates(LegData() As Variant, budget As Long, _
-                                  ByRef candMinSlack() As Double, ByRef candTotalSlack() As Double, _
-                                  ByRef candTotalTime() As Double, ByRef candChosen() As Variant, ByRef cnt As Long)
-    Dim leg0 As Variant
-    Dim n0 As Long, s0 As Long
-    Dim chosenIdx() As Long
-    Dim minSlack As Double, totalSlack As Double, totalTime As Double
+Private Sub SearchAllRoutes(ByVal budget As Long)
+    Dim r As Long, j As Long, p0 As Long, c As Long, ok As Boolean
+    Dim chosen() As Long, mn As Long, tt As Long, tm As Long
 
-    Application.StatusBar = "Searching every possible starting flight..."
+    nCand = 0
+    ReDim candRoute(1 To 1024): ReDim candMin(1 To 1024)
+    ReDim candTot(1 To 1024): ReDim candTime(1 To 1024)
+    ReDim candChosen(1 To 1024)
 
-    leg0 = LegData(0)
-    n0 = UBound(leg0, 1)
-    cnt = 0
-    ReDim candMinSlack(1 To n0)
-    ReDim candTotalSlack(1 To n0)
-    ReDim candTotalTime(1 To n0)
-    ReDim candChosen(1 To n0)
-
-    For s0 = 1 To n0
-        If BestForStart(LegData, s0, budget, chosenIdx, minSlack, totalSlack, totalTime) Then
-            cnt = cnt + 1
-            candMinSlack(cnt) = minSlack
-            candTotalSlack(cnt) = totalSlack
-            candTotalTime(cnt) = totalTime
-            candChosen(cnt) = chosenIdx
+    For r = 1 To N_ROUTES
+        ok = True
+        For j = 0 To routeLegs(r) - 1
+            If pCount(pairIdx(routeCity(r, j), routeCity(r, j + 1))) = 0 Then ok = False
+        Next j
+        If ok Then
+            Application.StatusBar = "Searching route " & r & " of " & N_ROUTES & "..."
+            p0 = pairIdx(routeCity(r, 0), routeCity(r, 1))
+            For c = pStart(p0) To pStart(p0) + pCount(p0) - 1
+                If BestForStart(r, c, budget, chosen, mn, tt, tm) Then
+                    nCand = nCand + 1
+                    If nCand > UBound(candRoute) Then
+                        ReDim Preserve candRoute(1 To 2 * nCand): ReDim Preserve candMin(1 To 2 * nCand)
+                        ReDim Preserve candTot(1 To 2 * nCand): ReDim Preserve candTime(1 To 2 * nCand)
+                        ReDim Preserve candChosen(1 To 2 * nCand)
+                    End If
+                    candRoute(nCand) = r
+                    candMin(nCand) = mn
+                    candTot(nCand) = tt
+                    candTime(nCand) = tm
+                    candChosen(nCand) = CopyLongs(chosen)
+                End If
+            Next c
         End If
-    Next s0
+    Next r
+End Sub
 
-    Application.StatusBar = False
-    If cnt = 0 Then Exit Sub
 
-    ' Insertion sort, minSlack desc then totalSlack desc -- same simple,
-    ' obviously-correct approach as SortLegByDep; cnt is at most a few hundred.
-    Dim i As Long, j As Long
-    Dim kMin As Double, kTot As Double, kTime As Double, kChosen As Variant
-    For i = 2 To cnt
-        kMin = candMinSlack(i): kTot = candTotalSlack(i): kTime = candTotalTime(i): kChosen = candChosen(i)
-        j = i - 1
-        Do While j >= 1
-            If candMinSlack(j) > kMin Or (candMinSlack(j) = kMin And candTotalSlack(j) >= kTot) Then Exit Do
-            candMinSlack(j + 1) = candMinSlack(j)
-            candTotalSlack(j + 1) = candTotalSlack(j)
-            candTotalTime(j + 1) = candTotalTime(j)
-            candChosen(j + 1) = candChosen(j)
-            j = j - 1
+' ===================== RANKING AND GROUPING =====================
+
+' True if candidate a ranks ahead of b: higher min slack, then higher total
+' slack, then shorter trip, then found first.
+Private Function CandBefore(ByVal a As Long, ByVal b As Long) As Boolean
+    If candMin(a) <> candMin(b) Then CandBefore = candMin(a) > candMin(b): Exit Function
+    If candTot(a) <> candTot(b) Then CandBefore = candTot(a) > candTot(b): Exit Function
+    If candTime(a) <> candTime(b) Then CandBefore = candTime(a) < candTime(b): Exit Function
+    CandBefore = a < b
+End Function
+
+
+Private Sub SortCandidates(idx() As Long, ByVal lo As Long, ByVal hi As Long)
+    Dim i As Long, j As Long, pivot As Long, tmp As Long
+    Do While lo < hi
+        i = lo: j = hi
+        pivot = idx((lo + hi) \ 2)
+        Do While i <= j
+            Do While CandBefore(idx(i), pivot): i = i + 1: Loop
+            Do While CandBefore(pivot, idx(j)): j = j - 1: Loop
+            If i <= j Then
+                tmp = idx(i): idx(i) = idx(j): idx(j) = tmp
+                i = i + 1: j = j - 1
+            End If
         Loop
-        candMinSlack(j + 1) = kMin
-        candTotalSlack(j + 1) = kTot
-        candTotalTime(j + 1) = kTime
-        candChosen(j + 1) = kChosen
-    Next i
-End Sub
-
-
-' Writes the Top-10 (or fewer, if fewer exist) alternative-routes table to
-' the bottom of the already-written output sheet, from the pre-sorted
-' candidate list ComputeAllCandidates produced. Rank 1 here is exactly the
-' same itinerary already detailed in full above -- same array, same sort --
-' so there is no possibility of the two disagreeing.
-Private Sub WriteAlternativesTable(LegData() As Variant, outSheetName As String, _
-                                    candMinSlack() As Double, candTotalSlack() As Double, _
-                                    candTotalTime() As Double, candChosen() As Variant, cnt As Long)
-    Dim topN As Long
-    topN = cnt
-    If topN > 10 Then topN = 10
-
-    Application.ScreenUpdating = False
-    Dim outWs As Worksheet
-    Set outWs = ThisWorkbook.Sheets(outSheetName)
-    Dim startRow As Long, hdrRow As Long, r As Long, i As Long
-    startRow = outWs.Cells(outWs.Rows.Count, 1).End(xlUp).Row + 2
-
-    With outWs.Range("A" & startRow & ":G" & startRow)
-        .Merge
-        .HorizontalAlignment = xlCenter
-        .Font.Bold = True
-        .Font.Size = 13
-        .Font.Color = RGB(255, 255, 255)
-        .Interior.Color = RGB(31, 78, 121)
-        .Value = "TOP " & topN & " ALTERNATIVE ROUTES  (out of " & cnt & " feasible starting flights)"
-    End With
-
-    hdrRow = startRow + 1
-    outWs.Cells(hdrRow, 1).Resize(1, 7).Value = Array("Rank", "Min Slack (min)", "Min Slack", _
-        "Total Slack (min)", "Total Slack", "Total Trip Time", "First Departure")
-    With outWs.Cells(hdrRow, 1).Resize(1, 7)
-        .Font.Bold = True
-        .Font.Color = RGB(255, 255, 255)
-        .Interior.Color = RGB(68, 114, 196)
-        .HorizontalAlignment = xlCenter
-    End With
-
-    Dim leg As Variant, firstDep As Date, thisChosen As Variant, firstDepIdx As Long
-    leg = LegData(0)
-    For i = 1 To topN
-        r = hdrRow + i
-        thisChosen = candChosen(i)
-        firstDepIdx = thisChosen(0)
-        firstDep = leg(firstDepIdx, 1)
-
-        outWs.Cells(r, 1).Value = i
-        outWs.Cells(r, 2).Value = CLng(Round(candMinSlack(i), 0))
-        outWs.Cells(r, 3).Value = FormatDuration(candMinSlack(i))
-        outWs.Cells(r, 4).Value = CLng(Round(candTotalSlack(i), 0))
-        outWs.Cells(r, 5).Value = FormatDuration(candTotalSlack(i))
-        outWs.Cells(r, 6).Value = FormatDuration(candTotalTime(i))
-        outWs.Cells(r, 7).Value = Format(firstDep, "mmm d, yyyy h:mm AM/PM")
-
-        If i = 1 Then
-            outWs.Cells(r, 1).Resize(1, 7).Interior.Color = RGB(255, 193, 7)     ' gold = the optimal path detailed in full above
-        ElseIf (i Mod 2) = 0 Then
-            outWs.Cells(r, 1).Resize(1, 7).Interior.Color = RGB(222, 235, 247)
+        If j - lo < hi - i Then
+            If lo < j Then SortCandidates idx, lo, j
+            lo = i
         Else
-            outWs.Cells(r, 1).Resize(1, 7).Interior.Color = RGB(242, 242, 242)
+            If i < hi Then SortCandidates idx, i, hi
+            hi = j
         End If
-        outWs.Cells(r, 1).Resize(1, 7).HorizontalAlignment = xlCenter
-    Next i
-    outWs.Cells(hdrRow, 1).Resize(topN + 1, 7).Borders.LineStyle = xlContinuous
-
-    Dim noteRow As Long
-    noteRow = hdrRow + topN + 2
-    outWs.Range("A" & noteRow & ":J" & noteRow).Merge
-    outWs.Range("A" & noteRow).Value = _
-        "Rank 1 (gold) is exactly the optimal path detailed in full above. Every other rank is the best COMPLETE " & _
-        "itinerary achievable starting from a different flight -- not an arbitrary partial trade-off -- so compare " & _
-        "Min Slack against Total Slack to judge whether a lower rank's larger total is worth its smaller worst case."
-    outWs.Range("A" & noteRow).Font.Italic = True
-    outWs.Range("A" & noteRow & ":J" & noteRow).WrapText = True
-
-    outWs.Columns("A:G").AutoFit
-    Application.ScreenUpdating = True
+    Loop
 End Sub
 
 
-Private Sub WriteResults(LegData() As Variant, chosenIdx() As Long, _
-                          Sstar As Long, totalMinutes As Double, budget As Long, isFeasible As Boolean, _
-                          routeLabel As String, outSheetName As String)
-    Dim outWs As Worksheet
-    Dim i As Long, r As Long
-    Dim depDT As Date, arrDT As Date
-    Dim srcRow As Long
-    Dim cityAfter As String
-    Dim req As Long
-    Dim leg As Variant, nextLeg As Variant
-    Dim flightLayover As String
-    Dim hdrRow As Long, connHdr As Long
-    Dim minSlackAmongOptimized As Double, thisSlack As Double
-    Dim minSlackRow As Long
-    Dim arrRow As Long, depRow As Long
-    Dim afterArr As Long, beforeDep As Long, openText As String
+Private Sub RankCandidates(ByRef rankIdx() As Long)
+    Dim i As Long
+    ReDim rankIdx(1 To nCand)
+    For i = 1 To nCand: rankIdx(i) = i: Next i
+    SortCandidates rankIdx, 1, nCand
+End Sub
 
-    Application.ScreenUpdating = False
+
+' Route number plus every airport-to-airport hop in order: two itineraries
+' with the same key are "the same route" (possibly on a different date or at
+' slightly different times).
+Private Function GroupKey(ByVal cand As Long) As String
+    Dim ch As Variant, j As Long, s As Long, f As Long, key As String
+    ch = candChosen(cand)
+    key = "R" & candRoute(cand)
+    For j = 0 To UBound(ch)
+        For s = cSegStart(ch(j)) To cSegStart(ch(j)) + cSegCount(ch(j)) - 1
+            f = segFlight(s)
+            key = key & "|" & apCode(fOrig(f)) & ">" & apCode(fDest(f))
+        Next s
+    Next j
+    GroupKey = key
+End Function
+
+
+' Same as GroupKey but also with every departure/arrival time measured from
+' midnight of the first day: equal only if it's the identical itinerary
+' shifted by whole days.
+Private Function ExactKey(ByVal cand As Long) As String
+    Dim ch As Variant, j As Long, s As Long, f As Long, key As String, day0 As Long
+    ch = candChosen(cand)
+    day0 = (cDep(ch(0)) \ 1440) * 1440
+    key = "R" & candRoute(cand)
+    For j = 0 To UBound(ch)
+        For s = cSegStart(ch(j)) To cSegStart(ch(j)) + cSegCount(ch(j)) - 1
+            f = segFlight(s)
+            key = key & "|" & apCode(fOrig(f)) & ">" & apCode(fDest(f)) & "@" & (fDep(f) - day0) & "-" & (fArr(f) - day0)
+        Next s
+    Next j
+    ExactKey = key
+End Function
+
+
+Private Function StartDay(ByVal cand As Long) As Long
+    Dim ch As Variant
+    ch = candChosen(cand)
+    StartDay = cDep(ch(0)) \ 1440
+End Function
+
+
+' Walks the ranked list; the first itinerary of each new group becomes a
+' shown option (up to TOP_N). Later members of a shown group add their start
+' date to that option's note (once per date).
+Private Sub GroupTopOptions(rankIdx() As Long, ByRef shown() As Long, ByRef alsoNote() As String, ByRef nShown As Long)
+    Dim lookup As New Collection
+    Dim i As Long, c As Long, g As Long, key As String, dayKey As String
+    Dim seenDays() As String, exact() As String
+
+    ReDim shown(1 To TOP_N)
+    ReDim alsoNote(1 To TOP_N)
+    ReDim seenDays(1 To TOP_N)
+    ReDim exact(1 To TOP_N)
+    nShown = 0
+
+    For i = 1 To nCand
+        c = rankIdx(i)
+        key = GroupKey(c)
+        g = 0
+        On Error Resume Next
+        g = lookup.Item(key)
+        On Error GoTo 0
+        If g = 0 Then
+            If nShown < TOP_N Then
+                nShown = nShown + 1
+                lookup.Add nShown, key
+                shown(nShown) = c
+                exact(nShown) = ExactKey(c)
+                seenDays(nShown) = "|" & StartDay(c) & "|"
+            End If
+        Else
+            dayKey = "|" & StartDay(c) & "|"
+            If InStr(seenDays(g), dayKey) = 0 Then
+                seenDays(g) = seenDays(g) & StartDay(c) & "|"
+                If alsoNote(g) <> "" Then alsoNote(g) = alsoNote(g) & ";  "
+                alsoNote(g) = alsoNote(g) & Format(CDate(StartDay(c)), "ddd mmm d")
+                If ExactKey(c) = exact(g) Then
+                    If candMin(c) <> candMin(shown(g)) Then
+                        alsoNote(g) = alsoNote(g) & " (min slack " & FormatDuration(CDbl(candMin(c))) & ")"
+                    End If
+                Else
+                    alsoNote(g) = alsoNote(g) & " (other flight times: min slack " & _
+                                  FormatDuration(CDbl(candMin(c))) & ", trip " & FormatDuration(CDbl(candTime(c))) & ")"
+                End If
+            End If
+        End If
+    Next i
+End Sub
+
+
+' ===================== OUTPUT =====================
+
+Private Function TravelType(ByVal f As Long) As String
+    If apCode(fOrig(f)) = "MPU" Or apCode(fDest(f)) = "MPU" Then TravelType = "Train" Else TravelType = "Flight"
+End Function
+
+
+Private Sub WriteTopSheet(shown() As Long, alsoNote() As String, ByVal nShown As Long, _
+                          ByVal budget As Long, ByVal missingPairs As String)
+    Dim outWs As Worksheet
+    Dim g As Long, col0 As Long, lastCol As Long, maxRow As Long, endRow As Long
+    Dim longestNote As Long
+
     Application.DisplayAlerts = False
     On Error Resume Next
-    ThisWorkbook.Sheets(outSheetName).Delete
+    ThisWorkbook.Sheets(OUT_SHEET).Delete
     On Error GoTo 0
     Application.DisplayAlerts = True
 
     Set outWs = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
-    outWs.Name = outSheetName
+    outWs.Name = OUT_SHEET
+    ActiveWindow.DisplayGridlines = False
 
-    ' ===================== SUMMARY BANNER =====================
-    With outWs.Range("A1:J1")
+    lastCol = nShown * (CARD_COLS + 1) - 1
+    With outWs.Range(outWs.Cells(1, 1), outWs.Cells(1, lastCol))
         .Merge
-        .HorizontalAlignment = xlCenter
+        .Value = "TOP " & nShown & " ROUTES  --  all " & N_ROUTES & " routings, every start date  " & _
+                 "|  ranked by worst-case slack, then total slack, then shortest trip"
         .Font.Bold = True
         .Font.Size = 14
         .Font.Color = RGB(255, 255, 255)
-        If isFeasible Then
-            .Value = routeLabel & "  |  OPTIMAL PATH FOUND  |  Guaranteed slack: " & Sstar & " min (" & FormatDuration(CDbl(Sstar)) & ")"
-            .Interior.Color = RGB(46, 125, 50)
-        Else
-            .Value = routeLabel & "  |  NO PATH FITS THE BUDGET  |  Showing tightest possible itinerary"
-            .Interior.Color = RGB(198, 40, 40)
-        End If
+        .Interior.Color = RGB(31, 78, 121)
+        .HorizontalAlignment = xlLeft
     End With
-
-    outWs.Range("A2").Value = "Total trip time (time-zone adjusted):"
-    outWs.Range("B2").Value = FormatDuration(totalMinutes)
-    outWs.Range("D2").Value = "Budget:"
-    outWs.Range("E2").Value = FormatDuration(CDbl(budget))
-    outWs.Range("G2").Value = "Under budget?"
-    outWs.Range("H2").Value = IIf(totalMinutes < budget, "YES", "NO")
-    outWs.Range("H2").Font.Bold = True
-    outWs.Range("H2").Font.Color = IIf(totalMinutes < budget, RGB(46, 125, 50), RGB(198, 40, 40))
-    outWs.Range("A2:H2").Font.Bold = True
-
-    Dim naiveTotal As Double, tzGap As Long
-    naiveTotal = totalMinutes + TZCorrectionMinutes()
-    tzGap = TZCorrectionMinutes()
-    With outWs.Range("A3:J3")
+    With outWs.Range(outWs.Cells(2, 1), outWs.Cells(2, lastCol))
         .Merge
+        .Value = nF & " flights/trains from '" & DATA_SHEET & "'  |  " & nCand & _
+                 " complete itineraries under the " & FormatDuration(CDbl(budget)) & " budget  |  every connection >= " & _
+                 MIN_CONNECTION_MINUTES & " min at the same airport  |  times are local" & _
+                 IIf(missingPairs <> "", "  |  no connections found for: " & missingPairs, "")
         .Font.Italic = True
         .Font.Size = 10
         .HorizontalAlignment = xlLeft
-        .Value = "Note: " & LegDest(N_LEGS - 1) & " is " & (Abs(tzGap) \ 60) & "h " & (Abs(tzGap) Mod 60) & "m " & _
-                 IIf(tzGap >= 0, "ahead of", "behind") & " " & LegOrigin(0) & "'s time zone (both fixed, no DST). " & _
-                 "The total above already accounts for this. The raw difference between the timestamps as they " & _
-                 "literally appear on the departure/arrival cells would read " & FormatDuration(naiveTotal) & "."
     End With
 
-    ' ===================== FLIGHT TABLE =====================
-    hdrRow = 4
-    outWs.Cells(hdrRow, 1).Resize(1, 10).Value = Array("Leg", "Origin", "Destination", "Departure Date", _
-        "Departure Time", "Arrival Date", "Arrival Time", "Leg Duration", "Source Row (" & SHEET_NAME & ")", "Flight Layover")
-    With outWs.Cells(hdrRow, 1).Resize(1, 10)
-        .Font.Bold = True
-        .Font.Color = RGB(255, 255, 255)
-        .Interior.Color = RGB(31, 78, 121)
-        .HorizontalAlignment = xlCenter
-    End With
+    maxRow = 0
+    For g = 1 To nShown
+        col0 = (g - 1) * (CARD_COLS + 1) + 1
+        endRow = WriteCard(outWs, g, shown(g), alsoNote(g), col0, 4, budget)
+        If endRow > maxRow Then maxRow = endRow
+        If Len(alsoNote(g)) > longestNote Then longestNote = Len(alsoNote(g))
+        outWs.Columns(col0 + CARD_COLS).ColumnWidth = 3
+    Next g
 
-    For i = 0 To N_LEGS - 1
-        r = hdrRow + 1 + i
-        leg = LegData(i)
-        depDT = leg(chosenIdx(i), 1)
-        arrDT = leg(chosenIdx(i), 2)
-        srcRow = leg(chosenIdx(i), 3)
-        flightLayover = leg(chosenIdx(i), 4)
+    ' "Also works starting" row (row 11): tall enough for the longest note
+    outWs.Rows(11).RowHeight = Application.WorksheetFunction.Min(409, 15 * (1 + longestNote \ 140))
+    outWs.Range("A4").Select
+End Sub
 
-        outWs.Cells(r, 1).Value = i + 1
-        outWs.Cells(r, 2).Value = LegOrigin(i)
-        outWs.Cells(r, 3).Value = LegDest(i)
-        outWs.Cells(r, 4).Value = DateValue(depDT)
-        outWs.Cells(r, 4).NumberFormat = "mmm d, yyyy (ddd)"
-        outWs.Cells(r, 5).Value = TimeValue(depDT)
-        outWs.Cells(r, 5).NumberFormat = "h:mm AM/PM"
-        outWs.Cells(r, 6).Value = DateValue(arrDT)
-        outWs.Cells(r, 6).NumberFormat = "mmm d, yyyy (ddd)"
-        outWs.Cells(r, 7).Value = TimeValue(arrDT)
-        outWs.Cells(r, 7).NumberFormat = "h:mm AM/PM"
-        ' Leg Duration = (local arrival - local departure), corrected for the
-        ' UTC-offset gap between this leg's two airports (see UTCOffsetMinutes
-        ' above) so it reflects true flight time, not a raw clock difference.
-        outWs.Cells(r, 8).Formula = "=(F" & r & "+G" & r & ")-(D" & r & "+E" & r & ")-(" & _
-            (UTCOffsetMinutes(LegDest(i)) - UTCOffsetMinutes(LegOrigin(i))) & "/1440)"
-        outWs.Cells(r, 8).NumberFormat = "[h]:mm"
-        outWs.Cells(r, 9).Value = srcRow
-        ' Mid-flight stopover text pulled straight from the source sheet's
-        ' "Layover Duration" column, if present -- informational only, NOT
-        ' the same thing as the "Actual Layover" in the connections table
-        ' below (which is the real city-to-city gap this macro optimizes).
-        ' Blank for legs with no stopover (nonstop flights, train legs) or
-        ' when the source sheet has no such column at all.
-        If flightLayover <> "" Then outWs.Cells(r, 10).Value = flightLayover
 
-        If (i Mod 2) = 0 Then
-            outWs.Cells(r, 1).Resize(1, 10).Interior.Color = RGB(222, 235, 247)
-        Else
-            outWs.Cells(r, 1).Resize(1, 10).Interior.Color = RGB(242, 242, 242)
-        End If
-    Next i
-    outWs.Cells(hdrRow, 1).Resize(N_LEGS + 1, 10).Borders.LineStyle = xlContinuous
+' Writes one option's card with its top-left corner at (top, col0) and
+' returns the last row used.
+Private Function WriteCard(outWs As Worksheet, ByVal rank As Long, ByVal cand As Long, ByVal note As String, _
+                           ByVal col0 As Long, ByVal topRow As Long, ByVal budget As Long) As Long
+    Dim r As Long, ch As Variant, j As Long, s As Long, f As Long, prevF As Long
+    Dim rt As Long, stepNo As Long, city As String, req As Long, sl As Long
+    Dim stayStart As Long, stayEnd As Long, afterArr As Long, beforeDep As Long
+    Dim txt As String, bindingRow As Long, bindingSlack As Long, haveBinding As Boolean
+    Dim firstDep As Long, lastArr As Long
 
-    ' ===================== CONNECTIONS / AUDIT TABLE =====================
-    connHdr = hdrRow + N_LEGS + 3
-    outWs.Cells(connHdr, 1).Resize(1, 13).Value = Array("Connecting City", "Arrival (prior leg)", _
-        "Departure (next leg)", "Actual Layover (min)", "Actual Layover", "Minimum Required (min)", _
-        "Minimum Required", "Slack (min)", "Slack = Layover - Min", "Counts Toward Objective?", _
-        "Open Hours Available", "Buffer After Arrival", "Buffer Before Departure")
-    With outWs.Cells(connHdr, 1).Resize(1, 13)
-        .Font.Bold = True
-        .Font.Color = RGB(255, 255, 255)
-        .Interior.Color = RGB(31, 78, 121)
-        .HorizontalAlignment = xlCenter
-    End With
+    rt = candRoute(cand)
+    ch = candChosen(cand)
+    firstDep = cDep(ch(0))
+    lastArr = cArr(ch(UBound(ch)))
 
-    minSlackAmongOptimized = -1
-    minSlackRow = 0
+    ' --- column widths ---
+    outWs.Columns(col0 + 0).ColumnWidth = 5     ' step
+    outWs.Columns(col0 + 1).ColumnWidth = 11    ' type
+    outWs.Columns(col0 + 2).ColumnWidth = 7     ' from
+    outWs.Columns(col0 + 3).ColumnWidth = 7     ' to
+    outWs.Columns(col0 + 4).ColumnWidth = 22    ' start
+    outWs.Columns(col0 + 5).ColumnWidth = 22    ' end
+    outWs.Columns(col0 + 6).ColumnWidth = 11    ' duration
+    outWs.Columns(col0 + 7).ColumnWidth = 11    ' minimum
+    outWs.Columns(col0 + 8).ColumnWidth = 11    ' slack
+    outWs.Columns(col0 + 9).ColumnWidth = 55    ' notes
 
-    For i = 0 To N_LEGS - 2   ' N_LEGS-1 connecting cities (CUZ may appear twice on routes 3-4 & 7-12)
-        r = connHdr + 1 + i
-        cityAfter = LegDest(i)
-        req = RequiredMinutes(cityAfter)
-        arrRow = hdrRow + 1 + i
-        depRow = hdrRow + 1 + i + 1
-
-        outWs.Cells(r, 1).Value = cityAfter
-        outWs.Cells(r, 2).Formula = "=F" & arrRow & "+G" & arrRow
-        outWs.Cells(r, 2).NumberFormat = "mmm d h:mm AM/PM"
-        outWs.Cells(r, 3).Formula = "=D" & depRow & "+E" & depRow
-        outWs.Cells(r, 3).NumberFormat = "mmm d h:mm AM/PM"
-        outWs.Cells(r, 4).Formula = "=ROUND((C" & r & "-B" & r & ")*1440,0)"
-        outWs.Cells(r, 5).Formula = "=INT(D" & r & "/60)&""h ""&MOD(D" & r & ",60)&""m"""
-        outWs.Cells(r, 6).Value = req
-        outWs.Cells(r, 7).Formula = "=INT(F" & r & "/60)&""h ""&MOD(F" & r & ",60)&""m"""
-        outWs.Cells(r, 8).Formula = "=D" & r & "-F" & r
-        outWs.Cells(r, 9).Formula = "=IF(H" & r & ">=0,INT(H" & r & "/60)&""h ""&MOD(H" & r & ",60)&""m"",""-""&INT(ABS(H" & r & ")/60)&""h ""&MOD(ABS(H" & r & "),60)&""m"")"
-        outWs.Cells(r, 10).Value = IIf(IsOptimizedCity(cityAfter), "YES", "no (CUZ)")
-
-        ' Open-hours audit: the clock times within (arrival + buffer) ..
-        ' (departure - buffer) that fall inside the city's open hours.
-        If OpenBuffers(cityAfter, afterArr, beforeDep) Then
-            leg = LegData(i)
-            nextLeg = LegData(i + 1)
-            openText = OpenOverlapText(cityAfter, ToMin(leg(chosenIdx(i), 2)) + afterArr, _
-                                       ToMin(nextLeg(chosenIdx(i + 1), 1)) - beforeDep)
-            If openText = "" Then
-                outWs.Cells(r, 11).Value = "none"
-                outWs.Cells(r, 11).Font.Color = RGB(198, 40, 40)
-            Else
-                outWs.Cells(r, 11).Value = openText
-            End If
-            outWs.Cells(r, 12).Value = (afterArr \ 60) & "h " & (afterArr Mod 60) & "m"
-            outWs.Cells(r, 13).Value = (beforeDep \ 60) & "h " & (beforeDep Mod 60) & "m"
-        Else
-            outWs.Cells(r, 11).Value = "n/a (no open-hours rule)"
-            outWs.Cells(r, 12).Value = "n/a"
-            outWs.Cells(r, 13).Value = "n/a"
-        End If
-
-        If IsOptimizedCity(cityAfter) Then
-            leg = LegData(i)
-            nextLeg = LegData(i + 1)
-            thisSlack = (nextLeg(chosenIdx(i + 1), 1) - leg(chosenIdx(i), 2)) * 1440# - req
-            If minSlackRow = 0 Then
-                minSlackAmongOptimized = thisSlack
-                minSlackRow = r
-            ElseIf thisSlack < minSlackAmongOptimized Then
-                minSlackAmongOptimized = thisSlack
-                minSlackRow = r
-            End If
-        End If
-    Next i
-    outWs.Cells(connHdr, 1).Resize(N_LEGS, 13).Borders.LineStyle = xlContinuous
-
-    For i = 0 To N_LEGS - 2
-        r = connHdr + 1 + i
-        cityAfter = LegDest(i)
-        If IsOptimizedCity(cityAfter) Then
-            If r = minSlackRow Then
-                outWs.Cells(r, 1).Resize(1, 13).Interior.Color = RGB(255, 193, 7)     ' gold = the binding constraint
-            Else
-                outWs.Cells(r, 1).Resize(1, 13).Interior.Color = RGB(198, 239, 206)   ' green = has surplus slack
-            End If
-        Else
-            outWs.Cells(r, 1).Resize(1, 13).Interior.Color = RGB(230, 230, 230)       ' gray = not part of objective (CUZ)
-        End If
-    Next i
-
-    ' ===================== TRIP TIMELINE (linear, step-by-step) =====================
-    ' A colorful, top-to-bottom retelling of the same itinerary above: one row
-    ' per FLIGHT/TRAIN segment (you're moving) alternating with one row per
-    ' LAYOVER segment (you're waiting in a city). Every value here is a
-    ' formula referencing the flight table or connections table already built
-    ' above, so this is purely a more readable *view* of that same data, not
-    ' a second calculation that could drift out of sync with it.
-    Dim tlHdr As Long, tlRow As Long, stepNum As Long, mode As String
-    Dim flightRow As Long, connRow As Long
-
-    tlHdr = connHdr + N_LEGS + 2
-    With outWs.Range("A" & tlHdr & ":J" & tlHdr)
+    ' --- title ---
+    With outWs.Range(outWs.Cells(topRow, col0), outWs.Cells(topRow, col0 + CARD_COLS - 1))
         .Merge
-        .HorizontalAlignment = xlCenter
+        .Value = "#" & rank & "   Route " & rt
         .Font.Bold = True
-        .Font.Size = 13
+        .Font.Size = 14
         .Font.Color = RGB(255, 255, 255)
-        .Interior.Color = RGB(31, 78, 121)
-        .Value = "TRIP TIMELINE  --  " & routeLabel
+        .Interior.Color = IIf(rank = 1, RGB(46, 125, 50), RGB(31, 78, 121))
+    End With
+    With outWs.Range(outWs.Cells(topRow + 1, col0), outWs.Cells(topRow + 1, col0 + CARD_COLS - 1))
+        .Merge
+        .Value = RouteLabel(rt)
+        .Font.Bold = True
+        .Interior.Color = RGB(221, 235, 247)
     End With
 
-    tlRow = tlHdr + 1
-    stepNum = 1
-    For i = 0 To N_LEGS - 1
-        flightRow = hdrRow + 1 + i
-        mode = IIf(UCase(LegOrigin(i)) = "MPU" Or UCase(LegDest(i)) = "MPU", "TRAIN", "FLIGHT")
+    ' --- summary ---
+    Call SummaryRow(outWs, topRow + 2, col0, "Worst-case slack", FormatDuration(CDbl(candMin(cand))) & _
+                    "  (" & candMin(cand) & " min) -- every counted destination gets at least this much extra time")
+    Call SummaryRow(outWs, topRow + 3, col0, "Total slack", FormatDuration(CDbl(candTot(cand))) & _
+                    "  (" & candTot(cand) & " min) -- extra time summed over all counted destinations")
+    Call SummaryRow(outWs, topRow + 4, col0, "Total trip time", FormatDuration(CDbl(candTime(cand))) & _
+                    "  (time-zone adjusted; budget " & FormatDuration(CDbl(budget)) & ")")
+    Call SummaryRow(outWs, topRow + 5, col0, "Trip starts", Format(MinToDate(firstDep), "ddd mmm d, yyyy h:mm AM/PM") & _
+                    "  from " & CityCode(routeCity(rt, 0)))
+    Call SummaryRow(outWs, topRow + 6, col0, "Trip ends", Format(MinToDate(lastArr), "ddd mmm d, yyyy h:mm AM/PM") & _
+                    "  in " & CityCode(routeCity(rt, routeLegs(rt))))
+    Call SummaryRow(outWs, topRow + 7, col0, "Also works starting", IIf(note = "", "(no other start dates)", note))
+    outWs.Cells(topRow + 7, col0 + 2).WrapText = True
+    outWs.Cells(topRow + 7, col0 + 2).VerticalAlignment = xlTop
+    outWs.Cells(topRow + 7, col0).VerticalAlignment = xlTop
 
-        outWs.Cells(tlRow, 1).Value = stepNum
-        outWs.Cells(tlRow, 2).Value = mode
-        outWs.Range("C" & tlRow & ":D" & tlRow).Merge
-        outWs.Cells(tlRow, 3).Formula = "=B" & flightRow & "&""  ->  ""&C" & flightRow
-        outWs.Range("E" & tlRow & ":F" & tlRow).Merge
-        outWs.Cells(tlRow, 5).Formula = "=TEXT(D" & flightRow & ",""mmm d"")&"" ""&TEXT(E" & flightRow & ",""h:mm AM/PM"")"
-        outWs.Range("G" & tlRow & ":H" & tlRow).Merge
-        outWs.Cells(tlRow, 7).Formula = "=TEXT(F" & flightRow & ",""mmm d"")&"" ""&TEXT(G" & flightRow & ",""h:mm AM/PM"")"
-        outWs.Range("I" & tlRow & ":J" & tlRow).Merge
-        outWs.Cells(tlRow, 9).Formula = "=H" & flightRow
-        outWs.Cells(tlRow, 9).NumberFormat = "[h]:mm"" hrs"""
+    ' --- step table ---
+    r = topRow + 9
+    outWs.Cells(r, col0).Resize(1, CARD_COLS).Value = Array("Step", "Type", "From", "To", "Start (local)", _
+        "End (local)", "Duration", "Min Required", "Slack", "Notes")
+    With outWs.Cells(r, col0).Resize(1, CARD_COLS)
+        .Font.Bold = True
+        .Font.Color = RGB(255, 255, 255)
+        .Interior.Color = RGB(31, 78, 121)
+        .HorizontalAlignment = xlCenter
+    End With
 
-        outWs.Range("A" & tlRow & ":J" & tlRow).Interior.Color = RGB(31, 119, 180)     ' blue = in motion
-        outWs.Range("A" & tlRow & ":J" & tlRow).Font.Color = RGB(255, 255, 255)
-        outWs.Range("A" & tlRow & ":J" & tlRow).Font.Bold = True
-        outWs.Range("A" & tlRow & ":J" & tlRow).HorizontalAlignment = xlCenter
-        tlRow = tlRow + 1
-        stepNum = stepNum + 1
+    stepNo = 0
+    For j = 0 To UBound(ch)
+        prevF = 0
+        For s = cSegStart(ch(j)) To cSegStart(ch(j)) + cSegCount(ch(j)) - 1
+            f = segFlight(s)
+            If prevF > 0 Then
+                ' connection at an in-between airport
+                r = r + 1: stepNo = stepNo + 1
+                Call StepRow(outWs, r, col0, stepNo, "Connection", apCode(fDest(prevF)), apCode(fOrig(f)), _
+                             fArr(prevF), fDep(f), MIN_CONNECTION_MINUTES, "", "Layover between flights")
+                outWs.Cells(r, col0).Resize(1, CARD_COLS).Interior.Color = RGB(242, 242, 242)
+                outWs.Cells(r, col0).Resize(1, CARD_COLS).Font.Italic = True
+            End If
+            r = r + 1: stepNo = stepNo + 1
+            Call StepRow(outWs, r, col0, stepNo, TravelType(f), apCode(fOrig(f)), apCode(fDest(f)), _
+                         fDep(f), fArr(f), -1, "", DATA_SHEET & " row " & fRow(f))
+            If fDur(f) >= 0 Then outWs.Cells(r, col0 + 6).Value = FormatDuration(CDbl(fDur(f)))
+            prevF = f
+        Next s
 
-        If i < N_LEGS - 1 Then
-            connRow = connHdr + 1 + i
-            outWs.Cells(tlRow, 1).Value = stepNum
-            outWs.Cells(tlRow, 2).Value = "LAYOVER"
-            outWs.Range("C" & tlRow & ":D" & tlRow).Merge
-            outWs.Cells(tlRow, 3).Formula = "=""Time in ""&A" & connRow
-            outWs.Range("E" & tlRow & ":F" & tlRow).Merge
-            outWs.Cells(tlRow, 5).Formula = "=TEXT(B" & connRow & ",""mmm d h:mm AM/PM"")"
-            outWs.Range("G" & tlRow & ":H" & tlRow).Merge
-            outWs.Cells(tlRow, 7).Formula = "=TEXT(C" & connRow & ",""mmm d h:mm AM/PM"")"
-            outWs.Range("I" & tlRow & ":J" & tlRow).Merge
-            outWs.Cells(tlRow, 9).Formula = "=E" & connRow
+        If j < UBound(ch) Then
+            ' stay at a destination
+            city = CityCode(routeCity(rt, j + 1))
+            req = RequiredMinutes(city)
+            stayStart = cArr(ch(j))
+            stayEnd = cDep(ch(j + 1))
+            sl = stayEnd - stayStart - req
+            txt = ""
+            If OpenBuffers(city, afterArr, beforeDep) Then
+                txt = "Open-hours time available: " & OpenOverlapText(city, stayStart + afterArr, stayEnd - beforeDep) & _
+                      "  (buffers " & FormatDuration(CDbl(afterArr)) & " after landing, " & _
+                      FormatDuration(CDbl(beforeDep)) & " before leaving)"
+            End If
+            f = segFlight(cSegStart(ch(j + 1)))
+            If apCode(fDest(prevF)) <> apCode(fOrig(f)) Then
+                txt = "Arrive " & apCode(fDest(prevF)) & ", leave from " & apCode(fOrig(f)) & IIf(txt = "", "", ".  ") & txt
+            End If
+            If Not IsOptimizedCity(city) Then txt = "Not counted toward the ranking." & IIf(txt = "", "", "  ") & txt
 
-            If IsOptimizedCity(LegDest(i)) Then
-                If connRow = minSlackRow Then
-                    outWs.Range("A" & tlRow & ":J" & tlRow).Interior.Color = RGB(255, 193, 7)    ' gold = the binding connection
-                Else
-                    outWs.Range("A" & tlRow & ":J" & tlRow).Interior.Color = RGB(198, 239, 206)  ' green = has surplus slack
+            r = r + 1: stepNo = stepNo + 1
+            Call StepRow(outWs, r, col0, stepNo, "STAY", apCode(fDest(prevF)), apCode(fOrig(f)), stayStart, stayEnd, req, CStr(sl), txt)
+            outWs.Cells(r, col0).Resize(1, CARD_COLS).Font.Bold = True
+            If IsOptimizedCity(city) Then
+                outWs.Cells(r, col0).Resize(1, CARD_COLS).Interior.Color = RGB(226, 239, 218)
+                If Not haveBinding Or sl < bindingSlack Then
+                    haveBinding = True: bindingSlack = sl: bindingRow = r
                 End If
             Else
-                outWs.Range("A" & tlRow & ":J" & tlRow).Interior.Color = RGB(230, 230, 230)      ' gray = CUZ, no minimum
+                outWs.Cells(r, col0).Resize(1, CARD_COLS).Interior.Color = RGB(217, 217, 217)
             End If
-            outWs.Range("A" & tlRow & ":J" & tlRow).Font.Bold = True
-            outWs.Range("A" & tlRow & ":J" & tlRow).HorizontalAlignment = xlCenter
-            tlRow = tlRow + 1
-            stepNum = stepNum + 1
         End If
-    Next i
-    outWs.Range("A" & tlHdr & ":J" & (tlRow - 1)).Borders.LineStyle = xlContinuous
+    Next j
 
-    ' legend
-    tlRow = tlRow + 1
-    outWs.Cells(tlRow, 1).Value = "Key:"
-    outWs.Cells(tlRow, 1).Font.Bold = True
-    outWs.Range("B" & tlRow & ":C" & tlRow).Merge
-    outWs.Range("B" & tlRow & ":C" & tlRow).Value = "In motion (flight/train)"
-    outWs.Range("B" & tlRow & ":C" & tlRow).Interior.Color = RGB(31, 119, 180)
-    outWs.Range("B" & tlRow & ":C" & tlRow).Font.Color = RGB(255, 255, 255)
-    outWs.Range("D" & tlRow & ":E" & tlRow).Merge
-    outWs.Range("D" & tlRow & ":E" & tlRow).Value = "Tightest layover (binding)"
-    outWs.Range("D" & tlRow & ":E" & tlRow).Interior.Color = RGB(255, 193, 7)
-    outWs.Range("F" & tlRow & ":G" & tlRow).Merge
-    outWs.Range("F" & tlRow & ":G" & tlRow).Value = "Layover with surplus slack"
-    outWs.Range("F" & tlRow & ":G" & tlRow).Interior.Color = RGB(198, 239, 206)
-    outWs.Range("H" & tlRow & ":J" & tlRow).Merge
-    outWs.Range("H" & tlRow & ":J" & tlRow).Value = "CUZ layover (no minimum, not optimized)"
-    outWs.Range("H" & tlRow & ":J" & tlRow).Interior.Color = RGB(230, 230, 230)
-    outWs.Range("A" & tlRow & ":J" & tlRow).HorizontalAlignment = xlCenter
+    If haveBinding Then
+        outWs.Cells(bindingRow, col0).Resize(1, CARD_COLS).Interior.Color = RGB(255, 230, 153)
+        outWs.Cells(bindingRow, col0 + 9).Value = Trim("TIGHTEST STAY (sets the worst-case slack).  " & outWs.Cells(bindingRow, col0 + 9).Value)
+    End If
 
-    outWs.Columns("A:M").AutoFit
-    outWs.Activate
-    Application.ScreenUpdating = True
+    With outWs.Range(outWs.Cells(topRow + 9, col0), outWs.Cells(r, col0 + CARD_COLS - 1))
+        .Borders.LineStyle = xlContinuous
+        .Borders.Color = RGB(191, 191, 191)
+    End With
+    outWs.Range(outWs.Cells(topRow + 10, col0 + 9), outWs.Cells(r, col0 + 9)).WrapText = True
+    outWs.Range(outWs.Cells(topRow + 10, col0), outWs.Cells(r, col0 + CARD_COLS - 1)).VerticalAlignment = xlTop
+
+    WriteCard = r
+End Function
+
+
+Private Sub SummaryRow(outWs As Worksheet, ByVal r As Long, ByVal col0 As Long, ByVal labelText As String, ByVal valueText As String)
+    With outWs.Range(outWs.Cells(r, col0), outWs.Cells(r, col0 + 1))
+        .Merge
+        .Value = labelText
+        .Font.Bold = True
+    End With
+    With outWs.Range(outWs.Cells(r, col0 + 2), outWs.Cells(r, col0 + CARD_COLS - 1))
+        .Merge
+        .NumberFormat = "@"          ' keep text like "Fri Dec 4" from being turned into a date
+        .Value = valueText
+        .HorizontalAlignment = xlLeft
+    End With
+End Sub
+
+
+' One row of the step table. minReq < 0 leaves Min Required blank.
+Private Sub StepRow(outWs As Worksheet, ByVal r As Long, ByVal col0 As Long, ByVal stepNo As Long, _
+                    ByVal kind As String, ByVal fromCode As String, ByVal toCode As String, _
+                    ByVal startM As Long, ByVal endM As Long, ByVal minReq As Long, _
+                    ByVal slackText As String, ByVal note As String)
+    outWs.Cells(r, col0 + 0).Value = stepNo
+    outWs.Cells(r, col0 + 1).Value = kind
+    outWs.Cells(r, col0 + 2).Value = fromCode
+    outWs.Cells(r, col0 + 3).Value = toCode
+    outWs.Cells(r, col0 + 4).Value = MinToDate(startM)
+    outWs.Cells(r, col0 + 4).NumberFormat = "ddd mmm d, h:mm AM/PM"
+    outWs.Cells(r, col0 + 5).Value = MinToDate(endM)
+    outWs.Cells(r, col0 + 5).NumberFormat = "ddd mmm d, h:mm AM/PM"
+    outWs.Cells(r, col0 + 6).Value = FormatDuration(CDbl(endM - startM))
+    If minReq >= 0 Then outWs.Cells(r, col0 + 7).Value = FormatDuration(CDbl(minReq))
+    If slackText <> "" Then outWs.Cells(r, col0 + 8).Value = FormatDuration(CDbl(CLng(slackText)))
+    outWs.Cells(r, col0 + 9).Value = note
+    outWs.Cells(r, col0).Resize(1, 4).HorizontalAlignment = xlCenter
 End Sub
