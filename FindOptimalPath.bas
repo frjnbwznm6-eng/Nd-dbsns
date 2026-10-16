@@ -51,7 +51,16 @@ Option Explicit
 '   minimums and open hours for the AMM group are all measured on Amman
 '   time, while every time shown on the output is the airport's own clock.
 '
-' MINIMUM STAYS AND OPEN HOURS (unchanged)
+' DELHI AND THE TAJ MAHAL (TAJ)
+'   Every time a route passes through DEL it becomes DEL -> TAJ -> DEL
+'   (InitRoutes adds the side trip): after landing in DEL you need at least
+'   DEL_BEFORE_TAJ_MINUTES (1h 30m) before the DEL -> TAJ departure, at
+'   least 1h 15m at TAJ, then the TAJ -> DEL trip back and at least
+'   DEL_AFTER_TAJ_MINUTES (2h 30m) in DEL before the next departure. The
+'   time at TAJ is what counts toward the ranking (the two DEL waits don't),
+'   and TAJ has the 6:15 AM - 5:00 PM, closed-Friday open hours.
+'
+' MINIMUM STAYS AND OPEN HOURS
 '   Every main destination you pass THROUGH has a required minimum stay
 '   (RequiredMinutes). Some also have daily open hours (OpenWindow and
 '   OpenBuffers): the part of the stay from (arrival + an after-arrival
@@ -112,6 +121,9 @@ Private Const TOP_N As Long = 10
 
 Private Const MIN_CONNECTION_MINUTES As Long = 60   ' minimum layover between two flights at an in-between airport
 
+Private Const DEL_BEFORE_TAJ_MINUTES As Long = 90   ' in DEL: landing -> DEL to TAJ departure
+Private Const DEL_AFTER_TAJ_MINUTES As Long = 150   ' in DEL: back from TAJ -> next departure
+
 Private Const BUDGET_DAYS As Long = 5
 Private Const BUDGET_HOURS As Long = 14
 Private Const BUDGET_MINUTES As Long = 0
@@ -119,7 +131,7 @@ Private Const BUDGET_MINUTES As Long = 0
 Private Const MAX_S_CAP As Long = 43200   ' safety cap on the slack search, minutes (30 days)
 
 Private Const N_ROUTES As Long = 12
-Private Const N_CITIES As Long = 8        ' MPU, CUZ, CUN, GIG, FCO, AMM, DEL, PEK -- see CityCode
+Private Const N_CITIES As Long = 9        ' MPU, CUZ, CUN, GIG, FCO, AMM, DEL, PEK, TAJ -- see CityCode
 Private Const CARD_COLS As Long = 10      ' columns per output card (plus one blank spacer column)
 ' -------------------------------------------------------------------------------
 
@@ -261,13 +273,19 @@ Private Function RouteText(ByVal r As Long) As String
 End Function
 
 
+' The route as it's actually searched, with the DEL -> TAJ -> DEL side trip.
 Private Function RouteLabel(ByVal r As Long) As String
-    RouteLabel = Replace(RouteText(r), " ", " -> ")
+    Dim j As Long, txt As String
+    For j = 0 To routeLegs(r)
+        If j > 0 Then txt = txt & " -> "
+        txt = txt & CityCode(routeCity(r, j))
+    Next j
+    RouteLabel = txt
 End Function
 
 
 Private Function CityCode(ByVal c As Long) As String
-    CityCode = Choose(c, "MPU", "CUZ", "CUN", "GIG", "FCO", "AMM", "DEL", "PEK")
+    CityCode = Choose(c, "MPU", "CUZ", "CUN", "GIG", "FCO", "AMM", "DEL", "PEK", "TAJ")
 End Function
 
 
@@ -323,15 +341,23 @@ End Function
 
 
 Private Sub InitRoutes()
-    Dim r As Long, j As Long, parts() As String
-    ReDim routeCity(1 To N_ROUTES, 0 To 20)
+    Dim r As Long, j As Long, n As Long, parts() As String
+    ReDim routeCity(1 To N_ROUTES, 0 To 30)
     ReDim routeLegs(1 To N_ROUTES)
     For r = 1 To N_ROUTES
         parts = Split(RouteText(r), " ")
-        routeLegs(r) = UBound(parts)
+        n = 0
         For j = 0 To UBound(parts)
-            routeCity(r, j) = CityIndex(parts(j))
+            routeCity(r, n) = CityIndex(parts(j))
+            ' passing through DEL means the TAJ side trip: DEL -> TAJ -> DEL
+            If parts(j) = "DEL" And j > 0 And j < UBound(parts) Then
+                routeCity(r, n + 1) = CityIndex("TAJ")
+                routeCity(r, n + 2) = CityIndex("DEL")
+                n = n + 2
+            End If
+            n = n + 1
         Next j
+        routeLegs(r) = n - 1
     Next r
     ReDim routeOn(1 To N_ROUTES)
     For r = 1 To N_ROUTES: routeOn(r) = True: Next r
@@ -415,7 +441,7 @@ Private Function UTCOffsetMinutes(city As String) As Long
         Case "GIG": UTCOffsetMinutes = -3 * 60
         Case "FCO": UTCOffsetMinutes = 1 * 60
         Case "AMM": UTCOffsetMinutes = 3 * 60
-        Case "DEL": UTCOffsetMinutes = 5 * 60 + 30
+        Case "DEL", "TAJ": UTCOffsetMinutes = 5 * 60 + 30
         Case "PEK": UTCOffsetMinutes = 8 * 60
         Case Else: UTCOffsetMinutes = 0   ' unrecognized city -- update the table above
     End Select
@@ -437,7 +463,7 @@ Private Function RequiredMinutes(city As String) As Long
         Case "GIG": RequiredMinutes = 3 * 60 + 1
         Case "FCO": RequiredMinutes = 3 * 60 + 0
         Case "AMM": RequiredMinutes = 7 * 60 + 38
-        Case "DEL": RequiredMinutes = 9 * 60 + 0
+        Case "TAJ": RequiredMinutes = 1 * 60 + 15
         Case "PEK": RequiredMinutes = 3 * 60 + 0
         Case Else: RequiredMinutes = 0
     End Select
@@ -448,9 +474,24 @@ End Function
 ' minimum is still enforced; its extra time just isn't counted.
 Private Function IsOptimizedCity(city As String) As Boolean
     Select Case UCase(city)
-        Case "MPU", "CUN", "GIG", "FCO", "AMM", "DEL", "PEK": IsOptimizedCity = True
-        Case Else: IsOptimizedCity = False
+        Case "MPU", "CUN", "GIG", "FCO", "AMM", "TAJ", "PEK": IsOptimizedCity = True
+        Case Else: IsOptimizedCity = False   ' CUZ, and the DEL waits around the TAJ trip
     End Select
+End Function
+
+
+' Minimum time at stop j of route r. Same as RequiredMinutes, except the
+' two DEL waits around the TAJ side trip.
+Private Function StayRequired(ByVal r As Long, ByVal j As Long) As Long
+    Dim city As String
+    city = CityCode(routeCity(r, j))
+    If city = "DEL" And CityCode(routeCity(r, j + 1)) = "TAJ" Then
+        StayRequired = DEL_BEFORE_TAJ_MINUTES
+    ElseIf city = "DEL" And CityCode(routeCity(r, j - 1)) = "TAJ" Then
+        StayRequired = DEL_AFTER_TAJ_MINUTES
+    Else
+        StayRequired = RequiredMinutes(city)
+    End If
 End Function
 
 
@@ -461,26 +502,26 @@ End Function
 Private Function OpenBuffers(ByVal city As String, ByRef afterArr As Long, ByRef beforeDep As Long) As Boolean
     OpenBuffers = True
     Select Case UCase(city)
-        Case "DEL": afterArr = 2 * 60 + 30: beforeDep = 3 * 60
+        Case "TAJ": afterArr = 0:           beforeDep = 0
         Case "PEK": afterArr = 1 * 60:      beforeDep = 2 * 60
         Case "AMM": afterArr = 2 * 60 + 30: beforeDep = 3 * 60
         Case "GIG": afterArr = 1 * 60:      beforeDep = 2 * 60 + 30
         Case "MPU": afterArr = 40:          beforeDep = 40
         Case "CUN": afterArr = 2 * 60:      beforeDep = 3 * 60
-        Case Else: OpenBuffers = False     ' FCO, CUZ: no open-hours rule
+        Case Else: OpenBuffers = False     ' FCO, CUZ, DEL: no open-hours rule
     End Select
 End Function
 
 
 ' The k-th open window (k = 1, 2, ...) for city on weekday wd (VBA Weekday:
 ' vbSunday = 1 ... vbSaturday = 7), as minutes after local midnight.
-' Returns False when there is no k-th window that day (e.g. DEL on Friday).
+' Returns False when there is no k-th window that day (e.g. TAJ on Friday).
 ' Windows within a day must be listed in time order.
 Private Function OpenWindow(ByVal city As String, ByVal wd As Long, ByVal k As Long, _
                             ByRef startMin As Long, ByRef endMin As Long) As Boolean
     OpenWindow = False
     Select Case UCase(city)
-        Case "DEL"   ' 6:15 AM - 5:00 PM, closed Friday
+        Case "TAJ"   ' 6:15 AM - 5:00 PM, closed Friday
             If k = 1 And wd <> vbFriday Then startMin = 6 * 60 + 15: endMin = 17 * 60: OpenWindow = True
         Case "PEK"   ' 7:30 AM - 6:00 PM weekdays, 7:30 AM - 6:30 PM Sat/Sun
             If k = 1 Then
@@ -950,7 +991,7 @@ Private Function Propagate(ByVal r As Long, ByVal startC As Long, ByVal S As Lon
     arr = cArr(startC)
     For j = 1 To routeLegs(r) - 1
         city = CityCode(routeCity(r, j))
-        req = RequiredMinutes(city)
+        req = StayRequired(r, j)
         If IsOptimizedCity(city) Then req = req + S
         minDep = arr + req
         If OpenBuffers(city, afterArr, beforeDep) Then
@@ -1022,7 +1063,7 @@ Private Function BestForStart(ByVal r As Long, ByVal startC As Long, ByVal budge
     For j = 1 To routeLegs(r) - 1
         city = CityCode(routeCity(r, j))
         If IsOptimizedCity(city) Then
-            sl = cDep(outChosen(j)) - cArr(outChosen(j - 1)) - RequiredMinutes(city)
+            sl = cDep(outChosen(j)) - cArr(outChosen(j - 1)) - StayRequired(r, j)
             outTot = outTot + sl
             If first Then
                 outMin = sl: first = False
@@ -1210,7 +1251,13 @@ End Sub
 ' ===================== OUTPUT =====================
 
 Private Function TravelType(ByVal f As Long) As String
-    If apCode(fOrig(f)) = "MPU" Or apCode(fDest(f)) = "MPU" Then TravelType = "Train" Else TravelType = "Flight"
+    If apCode(fOrig(f)) = "MPU" Or apCode(fDest(f)) = "MPU" Then
+        TravelType = "Train"
+    ElseIf apCode(fOrig(f)) = "TAJ" Or apCode(fDest(f)) = "TAJ" Then
+        TravelType = "Transfer"
+    Else
+        TravelType = "Flight"
+    End If
 End Function
 
 
@@ -1361,7 +1408,7 @@ Private Function WriteCard(outWs As Worksheet, ByVal rank As Long, ByVal cand As
         If j < UBound(ch) Then
             ' stay at a destination
             city = CityCode(routeCity(rt, j + 1))
-            req = RequiredMinutes(city)
+            req = StayRequired(rt, j + 1)
             stayStart = cArr(ch(j))
             stayEnd = cDep(ch(j + 1))
             sl = stayEnd - stayStart - req
@@ -1376,6 +1423,13 @@ Private Function WriteCard(outWs As Worksheet, ByVal rank As Long, ByVal cand As
                 txt = "Arrive " & apCode(fDest(prevF)) & ", leave from " & apCode(fOrig(f)) & "." & IIf(txt = "", "", "  ") & txt
             End If
             txt = txt & ClockNote(fDest(prevF), fOrig(f))
+            If city = "DEL" Then
+                If CityCode(routeCity(rt, j + 2)) = "TAJ" Then
+                    txt = "Wait before the trip to TAJ." & IIf(txt = "", "", "  ") & txt
+                Else
+                    txt = "Wait after getting back from TAJ." & IIf(txt = "", "", "  ") & txt
+                End If
+            End If
             If Not IsOptimizedCity(city) Then txt = "Not counted toward the ranking." & IIf(txt = "", "", "  ") & txt
 
             r = r + 1: stepNo = stepNo + 1
