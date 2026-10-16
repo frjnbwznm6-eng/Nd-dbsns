@@ -44,9 +44,12 @@ Option Explicit
 '     - connections never pass through a main-destination city; a leg from
 '       one destination to the next only stops at in-between airports
 '   Main destinations are cities, not airports: AirportCity maps PKX
-'   (Beijing Daxing) to PEK, so landing at either Beijing airport counts as
-'   being in Beijing (the itinerary notes when you land at one and leave from
-'   the other).
+'   (Beijing Daxing) to PEK, and ETM (Eilat Ramon) and AQJ (Aqaba) to AMM,
+'   so landing at any airport in a group counts as being in that city, and
+'   you can arrive at one and leave from another (the itinerary notes it).
+'   ETM is in Israel, 1 hour behind Amman (AirportUTCOffset): stay lengths,
+'   minimums and open hours for the AMM group are all measured on Amman
+'   time, while every time shown on the output is the airport's own clock.
 '
 ' MINIMUM STAYS AND OPEN HOURS (unchanged)
 '   Every main destination you pass THROUGH has a required minimum stay
@@ -121,14 +124,18 @@ Private Const CARD_COLS As Long = 10      ' columns per output card (plus one bl
 ' -------------------------------------------------------------------------------
 
 ' Airports, indexed 1..nAp. apCity is the main-destination city index
-' (1..N_CITIES) for airports that belong to one, else 0.
+' (1..N_CITIES) for airports that belong to one, else 0. apAdj is the
+' minutes added to that airport's local clock to put it on its city's
+' clock (e.g. +60 for ETM -> Amman time); 0 for everything else.
 Private nAp As Long
 Private apCode() As String
 Private apCity() As Long
+Private apAdj() As Long
 Private apLookup As Collection
 
 ' Individual flights/trains from DATA_SHEET, indexed 1..nF. Times are whole
-' minutes since VBA's day 0 (local time at that airport).
+' minutes since VBA's day 0: local time at that airport, except at a
+' main-destination airport, where they're on that city's clock (see apAdj).
 Private nF As Long
 Private fOrig() As Long, fDest() As Long
 Private fDep() As Long, fArr() As Long
@@ -277,9 +284,41 @@ End Function
 ' here if another airport should count as one of the destinations.
 Private Function AirportCity(ByVal code As String) As String
     Select Case code
-        Case "PKX": AirportCity = "PEK"   ' Beijing Daxing counts as Beijing
+        Case "PKX": AirportCity = "PEK"          ' Beijing Daxing counts as Beijing
+        Case "ETM", "AQJ": AirportCity = "AMM"   ' Eilat Ramon and Aqaba count as Amman
         Case Else: AirportCity = code
     End Select
+End Function
+
+
+' UTC offset of an airport in a destination group, when it differs from its
+' city's (UTCOffsetMinutes). ETM is in Israel (UTC+2 in Nov/Dec), an hour
+' behind Amman; AQJ and PKX share their city's clock.
+Private Function AirportUTCOffset(ByVal code As String) As Long
+    Select Case code
+        Case "ETM": AirportUTCOffset = 2 * 60
+        Case Else: AirportUTCOffset = UTCOffsetMinutes(AirportCity(code))
+    End Select
+End Function
+
+
+' A city-clock time at airport ap, back on that airport's own clock.
+Private Function LocalMin(ByVal t As Long, ByVal ap As Long) As Long
+    LocalMin = t - apAdj(ap)
+End Function
+
+
+' e.g. "  (ETM clocks are 1h 0m behind AMM)", or "" if both airports share
+' their city's clock.
+Private Function ClockNote(ByVal ap1 As Long, ByVal ap2 As Long) As String
+    Dim a As Variant, txt As String
+    For Each a In Array(ap1, ap2)
+        If apAdj(a) <> 0 And InStr(txt, apCode(a) & " ") = 0 Then
+            txt = txt & "  (" & apCode(a) & " clocks are " & (Abs(apAdj(a)) \ 60) & "h " & (Abs(apAdj(a)) Mod 60) & "m " & _
+                  IIf(apAdj(a) > 0, "behind ", "ahead of ") & CityCode(apCity(a)) & "; open hours are on " & CityCode(apCity(a)) & " time)"
+        End If
+    Next a
+    ClockNote = txt
 End Function
 
 
@@ -581,9 +620,15 @@ Private Function ApIndex(ByVal code As String) As Long
         If nAp > UBound(apCode) Then
             ReDim Preserve apCode(1 To 2 * nAp)
             ReDim Preserve apCity(1 To 2 * nAp)
+            ReDim Preserve apAdj(1 To 2 * nAp)
         End If
         apCode(nAp) = code
         apCity(nAp) = CityIndex(AirportCity(code))
+        If apCity(nAp) > 0 Then
+            apAdj(nAp) = UTCOffsetMinutes(AirportCity(code)) - AirportUTCOffset(code)
+        Else
+            apAdj(nAp) = 0
+        End If
         apLookup.Add nAp, code
         idx = nAp
     End If
@@ -633,6 +678,7 @@ Private Function LoadFlights() As Boolean
     nAp = 0
     ReDim apCode(1 To 256)
     ReDim apCity(1 To 256)
+    ReDim apAdj(1 To 256)
     Set apLookup = New Collection
     nF = 0
     ReDim fOrig(1 To n): ReDim fDest(1 To n)
@@ -648,8 +694,8 @@ Private Function LoadFlights() As Boolean
                     nF = nF + 1
                     fOrig(nF) = ApIndex(o)
                     fDest(nF) = ApIndex(d)
-                    fDep(nF) = depM
-                    fArr(nF) = arrM
+                    fDep(nF) = depM + apAdj(fOrig(nF))   ' city clock at grouped airports (see apAdj)
+                    fArr(nF) = arrM + apAdj(fDest(nF))
                     fRow(nF) = i
                     fDur(nF) = -1
                     If colDur > 0 Then
@@ -1233,8 +1279,9 @@ Private Function WriteCard(outWs As Worksheet, ByVal rank As Long, ByVal cand As
 
     rt = candRoute(cand)
     ch = candChosen(cand)
-    firstDep = cDep(ch(0))
-    lastArr = cArr(ch(UBound(ch)))
+    firstDep = LocalMin(cDep(ch(0)), fOrig(segFlight(cSegStart(ch(0)))))
+    f = segFlight(cSegStart(ch(UBound(ch))) + cSegCount(ch(UBound(ch))) - 1)
+    lastArr = LocalMin(cArr(ch(UBound(ch))), fDest(f))
 
     ' --- column widths ---
     outWs.Columns(col0 + 0).ColumnWidth = 5     ' step
@@ -1272,9 +1319,9 @@ Private Function WriteCard(outWs As Worksheet, ByVal rank As Long, ByVal cand As
     Call SummaryRow(outWs, topRow + 4, col0, "Total trip time", FormatDuration(CDbl(candTime(cand))) & _
                     "  (time-zone adjusted; budget " & FormatDuration(CDbl(budget)) & ")")
     Call SummaryRow(outWs, topRow + 5, col0, "Trip starts", Format(MinToDate(firstDep), "ddd mmm d, yyyy h:mm AM/PM") & _
-                    "  from " & CityCode(routeCity(rt, 0)))
+                    "  from " & apCode(fOrig(segFlight(cSegStart(ch(0))))))
     Call SummaryRow(outWs, topRow + 6, col0, "Trip ends", Format(MinToDate(lastArr), "ddd mmm d, yyyy h:mm AM/PM") & _
-                    "  in " & CityCode(routeCity(rt, routeLegs(rt))))
+                    "  in " & apCode(fDest(f)))
     Call SummaryRow(outWs, topRow + 7, col0, "Also works starting", IIf(note = "", "(no other start dates)", note))
     outWs.Cells(topRow + 7, col0 + 2).WrapText = True
     outWs.Cells(topRow + 7, col0 + 2).VerticalAlignment = xlTop
@@ -1299,13 +1346,13 @@ Private Function WriteCard(outWs As Worksheet, ByVal rank As Long, ByVal cand As
             If prevF > 0 Then
                 ' connection at an in-between airport
                 r = r + 1: stepNo = stepNo + 1
-                Call StepRow(outWs, r, col0, stepNo, "Connection", apCode(fDest(prevF)), apCode(fOrig(f)), _
+                Call StepRow(outWs, r, col0, stepNo, "Connection", fDest(prevF), fOrig(f), _
                              fArr(prevF), fDep(f), MIN_CONNECTION_MINUTES, "", "Layover between flights")
                 outWs.Cells(r, col0).Resize(1, CARD_COLS).Interior.Color = RGB(242, 242, 242)
                 outWs.Cells(r, col0).Resize(1, CARD_COLS).Font.Italic = True
             End If
             r = r + 1: stepNo = stepNo + 1
-            Call StepRow(outWs, r, col0, stepNo, TravelType(f), apCode(fOrig(f)), apCode(fDest(f)), _
+            Call StepRow(outWs, r, col0, stepNo, TravelType(f), fOrig(f), fDest(f), _
                          fDep(f), fArr(f), -1, "", DATA_SHEET & " row " & fRow(f))
             If fDur(f) >= 0 Then outWs.Cells(r, col0 + 6).Value = FormatDuration(CDbl(fDur(f)))
             prevF = f
@@ -1326,12 +1373,13 @@ Private Function WriteCard(outWs As Worksheet, ByVal rank As Long, ByVal cand As
             End If
             f = segFlight(cSegStart(ch(j + 1)))
             If apCode(fDest(prevF)) <> apCode(fOrig(f)) Then
-                txt = "Arrive " & apCode(fDest(prevF)) & ", leave from " & apCode(fOrig(f)) & IIf(txt = "", "", ".  ") & txt
+                txt = "Arrive " & apCode(fDest(prevF)) & ", leave from " & apCode(fOrig(f)) & "." & IIf(txt = "", "", "  ") & txt
             End If
+            txt = txt & ClockNote(fDest(prevF), fOrig(f))
             If Not IsOptimizedCity(city) Then txt = "Not counted toward the ranking." & IIf(txt = "", "", "  ") & txt
 
             r = r + 1: stepNo = stepNo + 1
-            Call StepRow(outWs, r, col0, stepNo, "STAY", apCode(fDest(prevF)), apCode(fOrig(f)), stayStart, stayEnd, req, CStr(sl), txt)
+            Call StepRow(outWs, r, col0, stepNo, "STAY", fDest(prevF), fOrig(f), stayStart, stayEnd, req, CStr(sl), Trim(txt))
             outWs.Cells(r, col0).Resize(1, CARD_COLS).Font.Bold = True
             If IsOptimizedCity(city) Then
                 outWs.Cells(r, col0).Resize(1, CARD_COLS).Interior.Color = RGB(226, 239, 218)
@@ -1375,18 +1423,20 @@ Private Sub SummaryRow(outWs As Worksheet, ByVal r As Long, ByVal col0 As Long, 
 End Sub
 
 
-' One row of the step table. minReq < 0 leaves Min Required blank.
+' One row of the step table. minReq < 0 leaves Min Required blank. startM and
+' endM are internal times at airports fromAp / toAp; they're shown on each
+' airport's own clock, and Duration is the true elapsed time between them.
 Private Sub StepRow(outWs As Worksheet, ByVal r As Long, ByVal col0 As Long, ByVal stepNo As Long, _
-                    ByVal kind As String, ByVal fromCode As String, ByVal toCode As String, _
+                    ByVal kind As String, ByVal fromAp As Long, ByVal toAp As Long, _
                     ByVal startM As Long, ByVal endM As Long, ByVal minReq As Long, _
                     ByVal slackText As String, ByVal note As String)
     outWs.Cells(r, col0 + 0).Value = stepNo
     outWs.Cells(r, col0 + 1).Value = kind
-    outWs.Cells(r, col0 + 2).Value = fromCode
-    outWs.Cells(r, col0 + 3).Value = toCode
-    outWs.Cells(r, col0 + 4).Value = MinToDate(startM)
+    outWs.Cells(r, col0 + 2).Value = apCode(fromAp)
+    outWs.Cells(r, col0 + 3).Value = apCode(toAp)
+    outWs.Cells(r, col0 + 4).Value = MinToDate(LocalMin(startM, fromAp))
     outWs.Cells(r, col0 + 4).NumberFormat = "ddd mmm d, h:mm AM/PM"
-    outWs.Cells(r, col0 + 5).Value = MinToDate(endM)
+    outWs.Cells(r, col0 + 5).Value = MinToDate(LocalMin(endM, toAp))
     outWs.Cells(r, col0 + 5).NumberFormat = "ddd mmm d, h:mm AM/PM"
     outWs.Cells(r, col0 + 6).Value = FormatDuration(CDbl(endM - startM))
     If minReq >= 0 Then outWs.Cells(r, col0 + 7).Value = FormatDuration(CDbl(minReq))
