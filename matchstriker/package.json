@@ -1,0 +1,14 @@
+{
+  "name": "matchstriker",
+  "version": "0.1.0",
+  "description": "Marketplace and business toolkit for independent matchmakers",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "reset": "rm -f data/matchstriker.db && node server.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}
