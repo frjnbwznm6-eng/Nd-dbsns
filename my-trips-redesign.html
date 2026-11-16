@@ -157,7 +157,8 @@
   .states { display: flex; gap: 6px; margin-bottom: 16px; background: #14163a; border-radius: 999px; padding: 4px; }
   .states button { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 13px; padding: 7px 14px; border-radius: 999px; cursor: pointer; }
   .states button[aria-pressed="true"] { background: #343777; color: #fff; font-weight: 600; }
-  body { align-content: center; justify-items: center; }
+  body { align-content: start; justify-items: center; }
+  .states { position: sticky; top: 12px; z-index: 10; box-shadow: 0 4px 20px rgba(0,0,0,.6); border: 1px solid rgba(120,130,255,.35); }
   .phone[data-state="before"] .s-mid, .phone[data-state="mid"] .s-before { display: none; }
   .done { color: var(--muted); display: inline-flex; align-items: center; gap: 4px; }
   .done svg { color: #6fe0a8; }
