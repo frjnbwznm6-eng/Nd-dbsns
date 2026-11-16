@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My Trips Redesign</title>
+<style>
+  :root {
+    --bg: #07082b;
+    --surface: #191b47;
+    --surface-2: #22255a;
+    --line: rgba(255, 255, 255, 0.1);
+    --text: #ffffff;
+    --muted: #a9add6;
+    --accent: #5fd0ff;
+    --accent-ink: #0a10b8;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    background: #02030f;
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: grid;
+    place-items: center;
+    padding: 24px 0;
+    -webkit-font-smoothing: antialiased;
+  }
+  .phone {
+    width: 100%;
+    max-width: 402px;
+    min-height: 860px;
+    background: var(--bg);
+    border-radius: 44px;
+    position: relative;
+    overflow: hidden;
+    padding: 0 16px 120px;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 30px 80px rgba(0, 0, 0, 0.6);
+  }
+  @media (max-width: 420px) {
+    body { padding: 0; }
+    .phone { border-radius: 0; min-height: 100vh; box-shadow: none; }
+  }
+
+  /* status bar */
+  .status {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 18px 26px 0; height: 54px;
+    font-weight: 600; font-size: 17px;
+  }
+  .status svg { display: block; }
+  .status .right { display: flex; gap: 7px; align-items: center; }
+
+  /* header */
+  .header {
+    display: grid; grid-template-columns: 44px 1fr 44px; align-items: center;
+    margin-top: 10px;
+  }
+  .header h1 { text-align: center; font-size: 22px; font-weight: 700; letter-spacing: -0.2px; }
+  .icon-btn {
+    width: 44px; height: 44px; border-radius: 50%;
+    background: var(--surface);
+    border: 1px solid rgba(120, 130, 255, 0.35);
+    color: #fff;
+    display: grid; place-items: center; /* glyph is optically and mathematically centred */
+    padding: 0; cursor: pointer;
+  }
+  .icon-btn svg { display: block; }
+
+  /* segmented control */
+  .segmented {
+    margin-top: 22px;
+    display: grid; grid-template-columns: 1fr 1fr;
+    background: var(--surface); border-radius: 999px; padding: 3px;
+  }
+  .segmented button {
+    border: 0; background: transparent; color: var(--muted);
+    font: inherit; font-size: 18px; padding: 10px 0; border-radius: 999px; cursor: pointer;
+  }
+  .segmented button[aria-selected="true"] {
+    background: var(--accent); color: var(--accent-ink); font-weight: 700;
+  }
+
+  .section-title {
+    margin: 30px 2px 14px;
+    display: flex; justify-content: space-between; align-items: baseline;
+  }
+  .section-title h2 { font-size: 21px; font-weight: 700; }
+  .countdown { font-size: 14px; color: var(--accent); font-weight: 600; }
+
+  /* trip card */
+  .card { background: var(--surface); border-radius: 26px; overflow: hidden; }
+  .hero { position: relative; height: 118px; }
+  .hero > svg { width: 100%; height: 100%; display: block; }
+  .chip { white-space: nowrap; }
+  .chip {
+    position: absolute; top: 12px; left: 12px;
+    display: inline-flex; align-items: center; gap: 6px;
+    background: rgba(7, 8, 43, 0.78); backdrop-filter: blur(6px);
+    border-radius: 999px; padding: 6px 11px;
+    font-size: 12.5px; font-weight: 700; letter-spacing: 0.2px;
+  }
+  .chip svg { color: var(--accent); }
+
+  .summary { padding: 16px 18px 14px; }
+  .route {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 26px; font-weight: 800; letter-spacing: -0.4px;
+  }
+  .route .swap { color: var(--accent); flex: none; }
+  .dates { margin-top: 5px; font-size: 15px; color: var(--muted); }
+  .dates b { color: var(--text); font-weight: 600; }
+
+  /* legs */
+  .leg {
+    display: block; width: 100%; text-align: left;
+    background: transparent; border: 0; border-top: 1px solid var(--line);
+    color: inherit; font: inherit; cursor: pointer;
+    padding: 14px 18px 16px;
+  }
+  .leg:active { background: var(--surface-2); }
+  .leg-head {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 13px; margin-bottom: 10px;
+  }
+  .leg-tag {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-weight: 700; letter-spacing: 0.7px; text-transform: uppercase; color: var(--accent);
+  }
+  .leg-tag .day { color: var(--text); letter-spacing: 0; text-transform: none; font-weight: 600; font-size: 14px; }
+  .leg-dur { color: var(--muted); }
+  .leg-body { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; }
+  .pt .time { font-size: 21px; font-weight: 700; letter-spacing: -0.3px; white-space: nowrap; }
+  .pt .time small { font-size: 12px; font-weight: 600; color: var(--muted); margin-left: 2px; }
+  .pt .apt { margin-top: 2px; font-size: 13.5px; color: var(--muted); }
+  .pt .apt b { color: var(--text); font-weight: 700; }
+  .pt.end { text-align: right; }
+  .path { display: flex; align-items: center; gap: 6px; color: var(--accent); }
+  .path i { flex: 1; height: 0; border-top: 2px dotted rgba(95, 208, 255, 0.45); }
+  .path svg { flex: none; }
+  .path.back svg { transform: scaleX(-1); }
+
+  .card-foot {
+    border-top: 1px solid var(--line);
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 13px 18px;
+    font-size: 14px;
+  }
+  .conf { color: var(--muted); }
+  .conf b { color: var(--text); font-weight: 700; letter-spacing: 1.2px; margin-left: 4px; }
+  .details {
+    display: inline-flex; align-items: center; gap: 4px;
+    color: var(--accent); font-weight: 700; background: none; border: 0; font-size: 14px; cursor: pointer; padding: 0;
+  }
+
+  /* tab bar */
+  .tabbar {
+    position: absolute; left: 20px; right: 20px; bottom: 22px;
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    background: var(--surface); border: 1px solid rgba(120, 130, 255, 0.35);
+    border-radius: 999px; padding: 4px;
+  }
+  .tabbar button {
+    border: 0; background: transparent; color: #fff; font: inherit; font-size: 11px;
+    display: grid; justify-items: center; gap: 3px; padding: 8px 0 7px; border-radius: 999px; cursor: pointer;
+  }
+  .tabbar button[aria-current="page"] { background: #343777; }
+</style>
+</head>
+<body>
+<main class="phone">
+
+  <div class="status" aria-hidden="true">
+    <span>11:10</span>
+    <span class="right">
+      <svg width="19" height="12" viewBox="0 0 19 12" fill="#fff"><rect x="0" y="8" width="3.2" height="4" rx="1"/><rect x="5" y="5.5" width="3.2" height="6.5" rx="1"/><rect x="10" y="3" width="3.2" height="9" rx="1" opacity=".35"/><rect x="15" y="0" width="3.2" height="12" rx="1" opacity=".35"/></svg>
+      <svg width="17" height="12" viewBox="0 0 17 12" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round"><path d="M1.2 4.2a10.4 10.4 0 0 1 14.6 0"/><path d="M3.9 6.9a6.6 6.6 0 0 1 9.2 0"/><circle cx="8.5" cy="10" r="1.1" fill="#fff" stroke="none"/></svg>
+      <svg width="27" height="13" viewBox="0 0 27 13" fill="none"><rect x=".5" y=".5" width="23" height="12" rx="3.8" stroke="#fff" opacity=".5"/><rect x="2" y="2" width="9" height="9" rx="2.4" fill="#fff"/><rect x="25" y="4.2" width="1.6" height="4.6" rx=".8" fill="#fff" opacity=".5"/></svg>
+    </span>
+  </div>
+
+  <header class="header">
+    <button class="icon-btn" aria-label="Profile">
+      <!-- symmetric 24×24 glyph: head and shoulders share the x=12 axis, bounds are vertically balanced -->
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="8" r="3.7"/>
+        <path d="M5 19.7c0-3.3 3.1-5.2 7-5.2s7 1.9 7 5.2"/>
+      </svg>
+    </button>
+    <h1>My trips</h1>
+    <button class="icon-btn" aria-label="Add a trip">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+  </header>
+
+  <div class="segmented" role="tablist">
+    <button role="tab" aria-selected="true">Upcoming</button>
+    <button role="tab" aria-selected="false">Past</button>
+  </div>
+
+  <div class="section-title">
+    <h2>Next trip</h2>
+    <span class="countdown">Leaves in 8 days</span>
+  </div>
+
+  <article class="card" aria-label="Round trip, New York JFK to Atlanta, November 24 to 29">
+    <div class="hero">
+      <svg viewBox="0 0 370 118" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+        <defs>
+          <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#2b3fa8"/><stop offset=".55" stop-color="#b86fb4"/><stop offset="1" stop-color="#ffb37a"/>
+          </linearGradient>
+          <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
+            <stop offset=".55" stop-color="#191b47" stop-opacity="0"/><stop offset="1" stop-color="#191b47"/>
+          </linearGradient>
+        </defs>
+        <rect width="370" height="118" fill="url(#sky)"/>
+        <circle cx="285" cy="92" r="26" fill="#ffd9a0" opacity=".75"/>
+        <g fill="#3a2f7a" opacity=".65">
+          <rect x="18" y="70" width="26" height="48"/><rect x="52" y="58" width="18" height="60"/><rect x="118" y="64" width="30" height="54"/>
+          <rect x="226" y="60" width="22" height="58"/><rect x="300" y="66" width="34" height="52"/><rect x="340" y="76" width="30" height="42"/>
+        </g>
+        <g fill="#1d1a55">
+          <rect x="0" y="86" width="30" height="32"/><rect x="36" y="76" width="20" height="42"/><rect x="74" y="50" width="22" height="68"/>
+          <path d="M79 50 85 36l6 14z"/><rect x="102" y="80" width="26" height="38"/>
+          <rect x="150" y="26" width="20" height="92" rx="3"/><rect x="158" y="14" width="4" height="14"/>
+          <rect x="178" y="56" width="24" height="62"/><path d="M178 56l12-12 12 12z"/>
+          <rect x="208" y="78" width="26" height="40"/><rect x="250" y="46" width="26" height="72"/><rect x="258" y="38" width="10" height="10"/>
+          <rect x="282" y="82" width="30" height="36"/><rect x="318" y="62" width="22" height="56"/><rect x="346" y="88" width="24" height="30"/>
+        </g>
+        <rect width="370" height="118" fill="url(#fade)"/>
+      </svg>
+      <span class="chip">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h15M15 4l4 4-4 4M20 16H5M9 12l-4 4 4 4"/></svg>
+        Round trip
+      </span>
+    </div>
+
+    <div class="summary">
+      <div class="route">
+        <span>New York</span>
+        <svg class="swap" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-label="round trip to"><path d="M4 8h15M15 4l4 4-4 4M20 16H5M9 12l-4 4 4 4"/></svg>
+        <span>Atlanta</span>
+      </div>
+      <p class="dates"><b>Tue, Nov 24 – Sun, Nov 29</b> · 5 nights</p>
+    </div>
+
+    <button class="leg" aria-label="Departing flight details">
+      <div class="leg-head">
+        <span class="leg-tag">Depart <span class="day">Tue, Nov 24</span></span>
+        <span class="leg-dur">2h 35m</span>
+      </div>
+      <div class="leg-body">
+        <div class="pt">
+          <div class="time">8:30<small>PM</small></div>
+          <div class="apt"><b>JFK</b> New York</div>
+        </div>
+        <div class="path" aria-hidden="true">
+          <i></i>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M2.5 13.2 4 12.6l3 1.6 4.4-1.7L5.6 5.9l2-.8 8.3 5.6 4-1.5c1.2-.4 2.3.1 2.6 1 .3.9-.3 1.9-1.5 2.4L6.4 18.3c-.5.2-1 .1-1.4-.3z"/></svg>
+          <i></i>
+        </div>
+        <div class="pt end">
+          <div class="time">11:05<small>PM</small></div>
+          <div class="apt">Atlanta <b>ATL</b></div>
+        </div>
+      </div>
+    </button>
+
+    <button class="leg" aria-label="Return flight details">
+      <div class="leg-head">
+        <span class="leg-tag">Return <span class="day">Sun, Nov 29</span></span>
+        <span class="leg-dur">2h 18m</span>
+      </div>
+      <div class="leg-body">
+        <div class="pt">
+          <div class="time">5:30<small>PM</small></div>
+          <div class="apt"><b>ATL</b> Atlanta</div>
+        </div>
+        <div class="path" aria-hidden="true">
+          <i></i>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M2.5 13.2 4 12.6l3 1.6 4.4-1.7L5.6 5.9l2-.8 8.3 5.6 4-1.5c1.2-.4 2.3.1 2.6 1 .3.9-.3 1.9-1.5 2.4L6.4 18.3c-.5.2-1 .1-1.4-.3z"/></svg>
+          <i></i>
+        </div>
+        <div class="pt end">
+          <div class="time">7:48<small>PM</small></div>
+          <div class="apt">New York <b>JFK</b></div>
+        </div>
+      </div>
+    </button>
+
+    <div class="card-foot">
+      <span class="conf">Confirmation <b>SERDZB</b></span>
+      <button class="details">Trip details
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>
+      </button>
+    </div>
+  </article>
+
+  <nav class="tabbar" aria-label="Main">
+    <button>
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11.2 12 4l8 7.2V20h-5.2v-5.4H9.2V20H4z"/></svg>
+      Home
+    </button>
+    <button aria-current="page">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M9.2 3.5h5.6c.6 0 1 .4 1 1V7H17a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2v.8a.8.8 0 0 1-1.6 0V20H8.6v.8a.8.8 0 0 1-1.6 0V20a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h1.2V4.500c0-.6.4-1 1-1zm.8 1.700V7h4V5.200z"/></svg>
+      My trips
+    </button>
+    <button>
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M2.5 13.2 4 12.6l3 1.6 4.4-1.7L5.600 5.900l2-.8 8.300 5.600 4-1.500c1.200-.4 2.300.1 2.600 1 .3.9-.3 1.900-1.500 2.400L6.400 18.300c-.5.2-1 .1-1.400-.3z" transform="rotate(-38 12 12)"/></svg>
+      Book
+    </button>
+    <button>
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8.5"/><g fill="currentColor" stroke="none"><circle cx="8" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="16" cy="12" r="1.2"/></g></svg>
+      More
+    </button>
+  </nav>
+</main>
+</body>
+</html>
