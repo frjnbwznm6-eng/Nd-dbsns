@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 330 64" role="img" aria-label="Guitar Seatbelt">
+  <g transform="translate(8 8)">
+    <rect width="48" height="48" rx="11" fill="#17181C"/>
+    <rect x="19" y="5" width="10" height="10" rx="2.5" fill="#F4EFE6"/>
+    <rect x="20.5" y="9" width="7" height="34" rx="2" fill="#F4EFE6"/>
+    <path d="M13 15a4 4 0 0 0-4 4v8h30v-8a4 4 0 0 0-4-4" fill="none" stroke="#E8472B" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <text x="70" y="42" font-family="'Bricolage Grotesque','Arial Black','Helvetica Neue',Arial,sans-serif" font-size="30" letter-spacing="-1" fill="#17181C"><tspan font-weight="500">guitar</tspan><tspan font-weight="800" fill="#E8472B">seatbelt</tspan></text>
+</svg>
